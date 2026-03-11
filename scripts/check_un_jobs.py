@@ -18,7 +18,7 @@ TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"].strip()
 KEYWORD = os.environ.get("KEYWORD", "VIENNA").strip().lower()
 MAX_ALERTS_PER_RUN = int(os.environ.get("MAX_ALERTS_PER_RUN", "10"))
 
-STATE_FILE = Path("data/seen_jobs.json")
+STATE_FILE = Path(os.environ.get("STATE_FILE", "data/seen_jobs.json"))
 
 
 def log(msg: str) -> None:
