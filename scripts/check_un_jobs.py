@@ -6,6 +6,7 @@ import time
 import html
 import urllib.parse
 import urllib.request
+import urllib.error
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from datetime import datetime
@@ -59,9 +60,12 @@ def strip_html(text: str) -> str:
     text = html.unescape(text or "")
     text = text.replace("&#13;", "\n")
     text = text.replace("\r", "")
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</p\s*>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", "\n", text)
     text = re.sub(r"\n+", "\n", text)
 
+    # IAEA RSS에서 가끔 보이는 깨짐 보정
     replacements = {
         "�셲": "’s",
         "�": "'",
@@ -72,6 +76,15 @@ def strip_html(text: str) -> str:
     return text.strip()
 
 
+def escape_html(s: str) -> str:
+    return (
+        (s or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
 def parse_date(item: dict) -> float:
     value = item.get("published", "") or item.get("updated", "")
     if value:
@@ -80,6 +93,36 @@ def parse_date(item: dict) -> float:
         except Exception:
             pass
     return 0.0
+
+
+def extract_tag(block: str, tag: str) -> str:
+    m = re.search(rf"<{tag}\b[^>]*>(.*?)</{tag}>", block, re.IGNORECASE | re.DOTALL)
+    if not m:
+        return ""
+    return strip_html(m.group(1)).strip()
+
+
+def parse_rss_fallback(xml_bytes: bytes) -> list[dict]:
+    text = xml_bytes.decode("utf-8", errors="replace")
+
+    items = []
+    for block in re.findall(r"<item\b.*?>.*?</item>", text, re.IGNORECASE | re.DOTALL):
+        title = extract_tag(block, "title")
+        link = extract_tag(block, "link")
+        description = extract_tag(block, "description")
+        pub_date = extract_tag(block, "pubDate")
+        guid = extract_tag(block, "guid")
+
+        if title or link:
+            items.append({
+                "title": title,
+                "link": html.unescape(link),
+                "description": description,
+                "published": pub_date,
+                "guid": guid,
+            })
+
+    return items
 
 
 def parse_rss(xml_bytes: bytes) -> list[dict]:
@@ -119,7 +162,13 @@ def parse_rss(xml_bytes: bytes) -> list[dict]:
             "guid": (guid or "").strip(),
         })
 
-    return items
+    if items:
+        return items
+
+    log("feedparser returned 0 items, trying fallback parser...")
+    fallback_items = parse_rss_fallback(xml_bytes)
+    log(f"Fallback parser items: {len(fallback_items)}")
+    return fallback_items
 
 
 def matches_keyword(item: dict) -> bool:
@@ -162,107 +211,70 @@ def telegram_send(message_html: str) -> None:
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        body = resp.read().decode("utf-8", errors="replace")
-        log(f"Telegram response: {body[:500]}")
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            log(f"Telegram response: {body[:500]}")
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8", errors="replace")
+        log(f"Telegram HTTPError {e.code}: {error_body}")
+        raise
 
 
-def escape_html(s: str) -> str:
-    return (
-        (s or "")
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
+# -------------------------
+# UN Careers helpers
+# -------------------------
 
-
-def convert_date(date_str: str) -> str:
+def format_un_dot_date(date_str: str) -> str:
+    """
+    Example:
+    03/05/2026 00:00:00 AM (New York time)
+    -> 2026. 03. 05.
+    """
     if not date_str:
         return ""
 
-    normalized = " ".join(date_str.split())
-
-    for fmt in ("%b %d, %Y", "%b %e, %Y"):
-        try:
-            dt = datetime.strptime(normalized, fmt)
-            return dt.strftime("%Y-%m-%d")
-        except ValueError:
-            pass
+    m = re.search(r"(\d{2})/(\d{2})/(\d{4})", date_str)
+    if m:
+        mm, dd, yyyy = m.groups()
+        return f"{yyyy}. {mm}. {dd}."
 
     return date_str
 
 
-def extract_field(description: str, field_name: str) -> str:
-    pattern = rf"^{re.escape(field_name)}\s*:\s*(.+)$"
-    match = re.search(pattern, description, re.IGNORECASE | re.MULTILINE)
+def extract_un_field(description: str, field_name: str) -> str:
+    pattern = rf"{re.escape(field_name)}\s*:\s*(.*?)(?:\n|$)"
+    match = re.search(pattern, description, re.IGNORECASE)
     if match:
-        return match.group(1).strip()
+        value = match.group(1).strip()
+        if value.lower() == "undefined":
+            return ""
+        return value
     return ""
 
 
-def clean_un_title(title: str) -> str:
-    title = re.sub(r"\s*\(.*?\)", "", title)
-    title = re.sub(r",\s*[A-Z]\d.*$", "", title)
-    return title.strip()
-
-
-def parse_taleo_title(title: str) -> tuple[str, str]:
-    match = re.match(r"^(.*?)\s*\(([^()]+)\)\s*$", title.strip())
-    if match:
-        return match.group(1).strip(), match.group(2).strip()
-    return title.strip(), ""
-
-
-def extract_un_agency(description: str) -> str:
-    office = extract_field(description, "Department/Office")
-    if office:
-        return office
-    return "United Nations"
-
-
-def extract_taleo_dates(description: str, published: str) -> tuple[str, str]:
-    start_date = ""
-    end_date = ""
-
-    try:
-        if published:
-            dt = parsedate_to_datetime(published)
-            start_date = dt.strftime("%Y-%m-%d")
-    except Exception:
-        start_date = published
-
-    patterns = [
-        r"Closing Date[:\s]+([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})",
-        r"Deadline[:\s]+([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})",
-        r"Closing date[:\s]+([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})",
-    ]
-    for p in patterns:
-        m = re.search(p, description, re.IGNORECASE)
-        if m:
-            end_date = convert_date(m.group(1))
-            break
-
-    return start_date, end_date
-
-
 def build_un_message(item: dict) -> str:
-    title_raw = item.get("title", "").strip()
-    description = item.get("description", "").strip()
-    link = item.get("link", "").strip()
+    title = (item.get("title") or "").strip()
+    description = (item.get("description") or "").strip()
+    link = (item.get("link") or "").strip()
 
-    agency = extract_un_agency(description)
-    title = clean_un_title(title_raw)
-    job_id = extract_field(description, "Job ID")
-    level = extract_field(description, "Level")
-    location = extract_field(description, "Duty Station")
-    start_date = convert_date(extract_field(description, "Date Posted"))
-    end_date = convert_date(extract_field(description, "Deadline"))
+    office = extract_un_field(description, "Department/Office")
+    job_id = extract_un_field(description, "Job ID")
+    level = extract_un_field(description, "Level")
+    location = extract_un_field(description, "Duty Station")
+    open_date = format_un_dot_date(extract_un_field(description, "Posted Date"))
+    closing_date = format_un_dot_date(extract_un_field(description, "Deadline"))
 
     parts = [
         "<b>[UN Careers]</b>",
-        escape_html(agency),
-        escape_html(title or title_raw),
+        "",
     ]
+
+    if office:
+        parts.append(escape_html(office))
+
+    parts.append(escape_html(title))
 
     if job_id:
         parts.append(f"ID: {escape_html(job_id)}")
@@ -270,42 +282,140 @@ def build_un_message(item: dict) -> str:
         parts.append(f"Level: {escape_html(level)}")
     if location:
         parts.append(f"Location: {escape_html(location)}")
-    if start_date:
-        parts.append(f"Start: {escape_html(start_date)}")
-    if end_date:
-        parts.append(f"End: {escape_html(end_date)}")
+    if open_date:
+        parts.append(f"Open: {escape_html(open_date)}")
+    if closing_date:
+        parts.append(f"Closing: {escape_html(closing_date)}")
     if link:
         parts.append(f'<a href="{escape_html(link)}">URL</a>')
 
     return "\n".join(parts)
 
 
-def build_taleo_message(item: dict) -> str:
-    title_raw = item.get("title", "").strip()
-    description = item.get("description", "").strip()
-    published = item.get("published", "").strip()
+# -------------------------
+# IAEA helpers
+# -------------------------
 
-    title, level = parse_taleo_title(title_raw)
-    start_date, end_date = extract_taleo_dates(description, published)
+def format_dot_date(date_str: str) -> str:
+    """
+    Example:
+    Tue, 10 Mar 2026 09:36:03 EDT -> 2026. 03. 10.
+    Mar 10, 2026 -> 2026. 03. 10.
+    """
+    if not date_str:
+        return ""
+
+    normalized = " ".join(date_str.split())
+
+    try:
+        dt = parsedate_to_datetime(normalized)
+        return dt.strftime("%Y. %m. %d.")
+    except Exception:
+        pass
+
+    for fmt in ("%b %d, %Y", "%b %e, %Y"):
+        try:
+            dt = datetime.strptime(normalized, fmt)
+            return dt.strftime("%Y. %m. %d.")
+        except ValueError:
+            pass
+
+    return date_str
+
+
+def clean_taleo_title(title: str) -> tuple[str, str]:
+    """
+    Examples:
+    'Sample Coordination and Reporting Associate(G6)'
+      -> ('Sample Coordination and Reporting Associate', 'G6')
+
+    'Associate Finance Officer (Accounts Payable)(P2) MULT'
+      -> ('Associate Finance Officer (Accounts Payable)', 'P2')
+    """
+    title = title.strip()
+
+    level = ""
+    m = re.search(r"\((P\d+|G\d+|NO?[A-Z]?\d+|FS\d+)\)\s*(MULT)?\s*$", title, re.IGNORECASE)
+    if m:
+        level = m.group(1).upper()
+        title = title[:m.start()].strip()
+        return title, level
+
+    m = re.search(r"\((P\d+|G\d+|NO?[A-Z]?\d+|FS\d+)\)\s*$", title, re.IGNORECASE)
+    if m:
+        level = m.group(1).upper()
+        title = title[:m.start()].strip()
+        return title, level
+
+    return title, ""
+
+
+def extract_duration(description: str) -> str:
+    """
+    Looks for:
+    Duration
+    12 months
+    or
+    Duration: 12 months
+    """
+    m = re.search(r"Duration\s*\n\s*([^\n]+)", description, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+
+    m = re.search(r"Duration[:\s]+([^\n]+)", description, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+
+    return ""
+
+
+def extract_closing_date(description: str) -> str:
+    patterns = [
+        r"Closing Date[:\s]+([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})",
+        r"Closing date[:\s]+([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})",
+        r"Deadline[:\s]+([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})",
+    ]
+    for p in patterns:
+        m = re.search(p, description, re.IGNORECASE)
+        if m:
+            return format_dot_date(m.group(1))
+    return ""
+
+
+def build_iaea_message(item: dict) -> str:
+    title_raw = (item.get("title") or "").strip()
+    description = (item.get("description") or "").strip()
+    published = (item.get("published") or "").strip()
+    link = (item.get("link") or "").strip()
+
+    title, level = clean_taleo_title(title_raw)
+    duration = extract_duration(description)
+    open_date = format_dot_date(published)
+    closing_date = extract_closing_date(description)
 
     parts = [
         "<b>[IAEA]</b>",
+        "",
         escape_html(title),
     ]
 
     if level:
         parts.append(f"Level: {escape_html(level)}")
-    if start_date:
-        parts.append(f"Start: {escape_html(start_date)}")
-    if end_date:
-        parts.append(f"End: {escape_html(end_date)}")
+    if duration:
+        parts.append(f"Duration: {escape_html(duration)}")
+    if open_date:
+        parts.append(f"Open: {escape_html(open_date)}")
+    if closing_date:
+        parts.append(f"Closing: {escape_html(closing_date)}")
+    if link:
+        parts.append(f'URL: <a href="{escape_html(link)}">Open posting</a>')
 
     return "\n".join(parts)
 
 
 def build_message(item: dict) -> str:
-    if SOURCE_LABEL.lower() == "iaea":
-        return build_taleo_message(item)
+    if SOURCE_LABEL.strip().lower() == "iaea":
+        return build_iaea_message(item)
     return build_un_message(item)
 
 
