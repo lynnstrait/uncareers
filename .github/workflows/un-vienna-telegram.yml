@@ -28,6 +28,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           KEYWORD: VIENNA
           MAX_ALERTS_PER_RUN: 10
+          STATE_FILE: data/seen_jobs.json
         run: python scripts/check_un_jobs.py
 
       - name: Commit updated state
@@ -35,5 +36,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data/seen_jobs.json
-          git diff --cached --quiet || git commit -m "Update seen jobs state"
+          git diff --cached --quiet || git commit -m "Update UN Careers seen jobs state"
           git push
