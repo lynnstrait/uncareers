@@ -1,4 +1,4 @@
-name: Second RSS to Telegram
+name: IAEA Taleo
 
 on:
   workflow_dispatch:
