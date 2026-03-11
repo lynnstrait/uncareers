@@ -21,6 +21,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install dependencies
+        run: pip install feedparser
+
       - name: Run checker
         env:
           FEED_URL: ${{ secrets.IAEA_FEED_URL }}
