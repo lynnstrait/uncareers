@@ -3,6 +3,7 @@ import os
 import re
 import sys
 import time
+import html
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -14,11 +15,10 @@ FEED_URL = os.environ["FEED_URL"].strip()
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"].strip()
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"].strip()
 
-# 기본값: Vienna
-KEYWORD = os.environ.get("KEYWORD", "VIENNA").strip().lower()
+KEYWORD = os.environ.get("KEYWORD", "").strip().lower()
 MAX_ALERTS_PER_RUN = int(os.environ.get("MAX_ALERTS_PER_RUN", "10"))
-
 STATE_FILE = Path(os.environ.get("STATE_FILE", "data/seen_jobs.json"))
+SOURCE_LABEL = os.environ.get("SOURCE_LABEL", "UN Careers").strip()
 
 
 def log(msg: str) -> None:
@@ -29,7 +29,7 @@ def fetch(url: str, timeout: int = 30) -> bytes:
     req = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "Mozilla/5.0 (compatible; UNJobWatcher/1.0)",
+            "User-Agent": "Mozilla/5.0 (compatible; RSSJobWatcher/1.0)",
             "Accept": "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8",
         },
     )
@@ -55,9 +55,20 @@ def save_state(state: dict) -> None:
 
 
 def strip_html(text: str) -> str:
-    text = re.sub(r"<[^>]+>", "\n", text or "")
-    text = re.sub(r"\r", "", text)
+    text = html.unescape(text or "")
+    text = text.replace("&#13;", "\n")
+    text = text.replace("\r", "")
+    text = re.sub(r"<[^>]+>", "\n", text)
     text = re.sub(r"\n+", "\n", text)
+
+    # IAEA Taleo RSS에서 종종 보이는 깨짐 보정
+    replacements = {
+        "�셲": "’s",
+        "�": "'",
+    }
+    for bad, good in replacements.items():
+        text = text.replace(bad, good)
+
     return text.strip()
 
 
@@ -76,7 +87,6 @@ def parse_rss(xml_bytes: bytes) -> list[dict]:
     root = ET.fromstring(xml_bytes)
     items = []
 
-    # RSS
     for item in root.findall(".//item"):
         items.append({
             "title": (item.findtext("title") or "").strip(),
@@ -86,7 +96,6 @@ def parse_rss(xml_bytes: bytes) -> list[dict]:
             "guid": (item.findtext("guid") or "").strip(),
         })
 
-    # Atom fallback
     if not items:
         ns = {"atom": "http://www.w3.org/2005/Atom"}
         for entry in root.findall(".//atom:entry", ns):
@@ -113,12 +122,24 @@ def parse_rss(xml_bytes: bytes) -> list[dict]:
 
 
 def matches_keyword(item: dict) -> bool:
+    if not KEYWORD:
+        return True
+
     haystack = " ".join([
         item.get("title", ""),
         item.get("description", ""),
         item.get("link", ""),
     ]).lower()
     return KEYWORD in haystack
+
+
+def is_real_job(item: dict) -> bool:
+    title = (item.get("title") or "").strip().lower()
+    if not title:
+        return False
+    if "more jobs available on career section" in title:
+        return False
+    return True
 
 
 def make_id(item: dict) -> str:
@@ -155,29 +176,22 @@ def escape_html(s: str) -> str:
 
 
 def convert_date(date_str: str) -> str:
-    """
-    Example:
-    'Mar 4, 2026' -> '2026-03-04'
-    """
     if not date_str:
         return ""
 
     normalized = " ".join(date_str.split())
 
-    try:
-        dt = datetime.strptime(normalized, "%b %d, %Y")
-        return dt.strftime("%Y-%m-%d")
-    except ValueError:
-        return date_str
+    for fmt in ("%b %d, %Y", "%b %e, %Y"):
+        try:
+            dt = datetime.strptime(normalized, fmt)
+            return dt.strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+
+    return date_str
 
 
 def extract_field(description: str, field_name: str) -> str:
-    """
-    Extract values like:
-    'Job ID: 273653'
-    'Level: P-2'
-    'Duty Station: NEW YORK'
-    """
     pattern = rf"^{re.escape(field_name)}\s*:\s*(.+)$"
     match = re.search(pattern, description, re.IGNORECASE | re.MULTILINE)
     if match:
@@ -185,23 +199,68 @@ def extract_field(description: str, field_name: str) -> str:
     return ""
 
 
-def clean_title(title: str) -> str:
-    """
-    Example:
-    'Associate Data Analyst (Temporary), P2, P2'
-    -> 'Associate Data Analyst'
-    """
+def clean_un_title(title: str) -> str:
     title = re.sub(r"\s*\(.*?\)", "", title)
     title = re.sub(r",\s*[A-Z]\d.*$", "", title)
     return title.strip()
 
 
-def build_message(item: dict) -> str:
+def parse_taleo_title(title: str) -> tuple[str, str]:
+    """
+    Example:
+    'Associate Microsoft 365 Platform Analyst (P2)'
+    -> ('Associate Microsoft 365 Platform Analyst', 'P2')
+    """
+    match = re.match(r"^(.*?)\s*\(([^()]+)\)\s*$", title.strip())
+    if match:
+        return match.group(1).strip(), match.group(2).strip()
+    return title.strip(), ""
+
+
+def extract_un_agency(description: str) -> str:
+    office = extract_field(description, "Department/Office")
+    if office:
+        return office
+    return "United Nations"
+
+
+def extract_taleo_dates(description: str, published: str) -> tuple[str, str]:
+    """
+    Taleo RSS에는 보통 시작/마감일 구조화 필드가 없어서,
+    시작일은 pubDate 사용, 마감일은 description 안에서 탐색.
+    """
+    start_date = ""
+    end_date = ""
+
+    try:
+        if published:
+            dt = parsedate_to_datetime(published)
+            start_date = dt.strftime("%Y-%m-%d")
+    except Exception:
+        start_date = published
+
+    # 간단한 패턴 탐색
+    patterns = [
+        r"Closing Date[:\s]+([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})",
+        r"Deadline[:\s]+([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})",
+        r"Closing date[:\s]+([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})",
+    ]
+    for p in patterns:
+        m = re.search(p, description, re.IGNORECASE)
+        if m:
+            end_date = convert_date(m.group(1))
+            break
+
+    return start_date, end_date
+
+
+def build_un_message(item: dict) -> str:
     title_raw = item.get("title", "").strip()
     description = item.get("description", "").strip()
     link = item.get("link", "").strip()
 
-    title = clean_title(title_raw)
+    agency = extract_un_agency(description)
+    title = clean_un_title(title_raw)
     job_id = extract_field(description, "Job ID")
     level = extract_field(description, "Level")
     location = extract_field(description, "Duty Station")
@@ -210,6 +269,7 @@ def build_message(item: dict) -> str:
 
     parts = [
         "<b>[UN Careers]</b>",
+        escape_html(agency),
         escape_html(title or title_raw),
     ]
 
@@ -224,9 +284,38 @@ def build_message(item: dict) -> str:
     if end_date:
         parts.append(f"End: {escape_html(end_date)}")
     if link:
-        parts.append(f'<a href="{escape_html(link)}">Open Job Posting</a>')
+        parts.append(f'<a href="{escape_html(link)}">URL</a>')
 
     return "\n".join(parts)
+
+
+def build_taleo_message(item: dict) -> str:
+    title_raw = item.get("title", "").strip()
+    description = item.get("description", "").strip()
+    published = item.get("published", "").strip()
+
+    title, level = parse_taleo_title(title_raw)
+    start_date, end_date = extract_taleo_dates(description, published)
+
+    parts = [
+        "<b>[IAEA]</b>",
+        escape_html(title),
+    ]
+
+    if level:
+        parts.append(f"Level: {escape_html(level)}")
+    if start_date:
+        parts.append(f"Start: {escape_html(start_date)}")
+    if end_date:
+        parts.append(f"End: {escape_html(end_date)}")
+
+    return "\n".join(parts)
+
+
+def build_message(item: dict) -> str:
+    if SOURCE_LABEL.lower() == "iaea":
+        return build_taleo_message(item)
+    return build_un_message(item)
 
 
 def main() -> int:
@@ -239,10 +328,10 @@ def main() -> int:
         log("No items found in feed.")
         return 0
 
-    filtered = [x for x in items if matches_keyword(x)]
+    filtered = [x for x in items if is_real_job(x) and matches_keyword(x)]
     filtered.sort(key=parse_date, reverse=True)
 
-    log(f"Matched keyword '{KEYWORD}': {len(filtered)}")
+    log(f"Matched items: {len(filtered)}")
 
     state = load_state()
     seen_ids = set(state.get("seen_ids", []))
