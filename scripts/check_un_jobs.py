@@ -6,10 +6,11 @@ import time
 import html
 import urllib.parse
 import urllib.request
-import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from datetime import datetime
+
+import feedparser
 
 FEED_URL = os.environ["FEED_URL"].strip()
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"].strip()
@@ -61,7 +62,6 @@ def strip_html(text: str) -> str:
     text = re.sub(r"<[^>]+>", "\n", text)
     text = re.sub(r"\n+", "\n", text)
 
-    # IAEA Taleo RSS에서 종종 보이는 깨짐 보정
     replacements = {
         "�셲": "’s",
         "�": "'",
@@ -73,50 +73,51 @@ def strip_html(text: str) -> str:
 
 
 def parse_date(item: dict) -> float:
-    for key in ("published", "pubDate", "updated"):
-        value = item.get(key)
-        if value:
-            try:
-                return parsedate_to_datetime(value).timestamp()
-            except Exception:
-                pass
+    value = item.get("published", "") or item.get("updated", "")
+    if value:
+        try:
+            return parsedate_to_datetime(value).timestamp()
+        except Exception:
+            pass
     return 0.0
 
 
 def parse_rss(xml_bytes: bytes) -> list[dict]:
-    root = ET.fromstring(xml_bytes)
+    feed = feedparser.parse(xml_bytes)
+
+    if getattr(feed, "bozo", 0):
+        log(f"Feed parser warning: {feed.bozo_exception}")
+
     items = []
+    for entry in feed.entries:
+        title = (getattr(entry, "title", "") or "").strip()
+        link = (getattr(entry, "link", "") or "").strip()
 
-    for item in root.findall(".//item"):
+        description = ""
+        if hasattr(entry, "summary"):
+            description = entry.summary
+        elif hasattr(entry, "description"):
+            description = entry.description
+
+        published = ""
+        if hasattr(entry, "published"):
+            published = entry.published
+        elif hasattr(entry, "updated"):
+            published = entry.updated
+
+        guid = ""
+        if hasattr(entry, "id"):
+            guid = entry.id
+        elif hasattr(entry, "guid"):
+            guid = entry.guid
+
         items.append({
-            "title": (item.findtext("title") or "").strip(),
-            "link": (item.findtext("link") or "").strip(),
-            "description": strip_html(item.findtext("description") or ""),
-            "published": (item.findtext("pubDate") or "").strip(),
-            "guid": (item.findtext("guid") or "").strip(),
+            "title": title,
+            "link": link,
+            "description": strip_html(description),
+            "published": (published or "").strip(),
+            "guid": (guid or "").strip(),
         })
-
-    if not items:
-        ns = {"atom": "http://www.w3.org/2005/Atom"}
-        for entry in root.findall(".//atom:entry", ns):
-            link = ""
-            for l in entry.findall("atom:link", ns):
-                href = l.attrib.get("href", "").strip()
-                rel = l.attrib.get("rel", "alternate")
-                if href and rel == "alternate":
-                    link = href
-                    break
-            items.append({
-                "title": (entry.findtext("atom:title", default="", namespaces=ns) or "").strip(),
-                "link": link,
-                "description": strip_html(entry.findtext("atom:summary", default="", namespaces=ns) or ""),
-                "published": (
-                    entry.findtext("atom:published", default="", namespaces=ns)
-                    or entry.findtext("atom:updated", default="", namespaces=ns)
-                    or ""
-                ).strip(),
-                "guid": (entry.findtext("atom:id", default="", namespaces=ns) or "").strip(),
-            })
 
     return items
 
@@ -206,11 +207,6 @@ def clean_un_title(title: str) -> str:
 
 
 def parse_taleo_title(title: str) -> tuple[str, str]:
-    """
-    Example:
-    'Associate Microsoft 365 Platform Analyst (P2)'
-    -> ('Associate Microsoft 365 Platform Analyst', 'P2')
-    """
     match = re.match(r"^(.*?)\s*\(([^()]+)\)\s*$", title.strip())
     if match:
         return match.group(1).strip(), match.group(2).strip()
@@ -225,10 +221,6 @@ def extract_un_agency(description: str) -> str:
 
 
 def extract_taleo_dates(description: str, published: str) -> tuple[str, str]:
-    """
-    Taleo RSS에는 보통 시작/마감일 구조화 필드가 없어서,
-    시작일은 pubDate 사용, 마감일은 description 안에서 탐색.
-    """
     start_date = ""
     end_date = ""
 
@@ -239,7 +231,6 @@ def extract_taleo_dates(description: str, published: str) -> tuple[str, str]:
     except Exception:
         start_date = published
 
-    # 간단한 패턴 탐색
     patterns = [
         r"Closing Date[:\s]+([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})",
         r"Deadline[:\s]+([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})",
@@ -320,8 +311,21 @@ def build_message(item: dict) -> str:
 
 def main() -> int:
     log(f"Fetching feed: {FEED_URL}")
-    xml_bytes = fetch(FEED_URL)
-    items = parse_rss(xml_bytes)
+
+    try:
+        xml_bytes = fetch(FEED_URL)
+    except Exception as e:
+        log(f"Failed to fetch feed: {e}")
+        return 1
+
+    try:
+        items = parse_rss(xml_bytes)
+    except Exception as e:
+        preview = xml_bytes[:500].decode("utf-8", errors="replace")
+        log(f"Failed to parse feed: {e}")
+        log(f"Feed preview: {preview}")
+        return 1
+
     log(f"Fetched items: {len(items)}")
 
     if not items:
