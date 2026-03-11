@@ -1,4 +1,4 @@
-name: UN Vienna Jobs to Telegram
+name: UN Careers
 
 on:
   workflow_dispatch:
