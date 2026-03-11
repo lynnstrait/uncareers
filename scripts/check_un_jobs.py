@@ -8,6 +8,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from datetime import datetime
 
 FEED_URL = os.environ["FEED_URL"].strip()
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"].strip()
@@ -54,9 +55,10 @@ def save_state(state: dict) -> None:
 
 
 def strip_html(text: str) -> str:
-    text = re.sub(r"<[^>]+>", " ", text or "")
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+    text = re.sub(r"<[^>]+>", "\n", text or "")
+    text = re.sub(r"\r", "", text)
+    text = re.sub(r"\n+", "\n", text)
+    return text.strip()
 
 
 def parse_date(item: dict) -> float:
@@ -99,8 +101,11 @@ def parse_rss(xml_bytes: bytes) -> list[dict]:
                 "title": (entry.findtext("atom:title", default="", namespaces=ns) or "").strip(),
                 "link": link,
                 "description": strip_html(entry.findtext("atom:summary", default="", namespaces=ns) or ""),
-                "published": (entry.findtext("atom:published", default="", namespaces=ns) or
-                              entry.findtext("atom:updated", default="", namespaces=ns) or "").strip(),
+                "published": (
+                    entry.findtext("atom:published", default="", namespaces=ns)
+                    or entry.findtext("atom:updated", default="", namespaces=ns)
+                    or ""
+                ).strip(),
                 "guid": (entry.findtext("atom:id", default="", namespaces=ns) or "").strip(),
             })
 
@@ -142,28 +147,84 @@ def telegram_send(message_html: str) -> None:
 
 def escape_html(s: str) -> str:
     return (
-        s.replace("&", "&amp;")
-         .replace("<", "&lt;")
-         .replace(">", "&gt;")
+        (s or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
     )
 
 
+def convert_date(date_str: str) -> str:
+    """
+    Example:
+    'Mar 4, 2026' -> '2026-03-04'
+    """
+    if not date_str:
+        return ""
+
+    normalized = " ".join(date_str.split())
+
+    try:
+        dt = datetime.strptime(normalized, "%b %d, %Y")
+        return dt.strftime("%Y-%m-%d")
+    except ValueError:
+        return date_str
+
+
+def extract_field(description: str, field_name: str) -> str:
+    """
+    Extract values like:
+    'Job ID: 273653'
+    'Level: P-2'
+    'Duty Station: NEW YORK'
+    """
+    pattern = rf"^{re.escape(field_name)}\s*:\s*(.+)$"
+    match = re.search(pattern, description, re.IGNORECASE | re.MULTILINE)
+    if match:
+        return match.group(1).strip()
+    return ""
+
+
+def clean_title(title: str) -> str:
+    """
+    Example:
+    'Associate Data Analyst (Temporary), P2, P2'
+    -> 'Associate Data Analyst'
+    """
+    title = re.sub(r"\s*\(.*?\)", "", title)
+    title = re.sub(r",\s*[A-Z]\d.*$", "", title)
+    return title.strip()
+
+
 def build_message(item: dict) -> str:
-    title = escape_html(item.get("title", "Untitled"))
-    link = escape_html(item.get("link", ""))
-    desc = escape_html(item.get("description", ""))[:500]
-    published = escape_html(item.get("published", ""))
+    title_raw = item.get("title", "").strip()
+    description = item.get("description", "").strip()
+    link = item.get("link", "").strip()
+
+    title = clean_title(title_raw)
+    job_id = extract_field(description, "Job ID")
+    level = extract_field(description, "Level")
+    location = extract_field(description, "Duty Station")
+    start_date = convert_date(extract_field(description, "Date Posted"))
+    end_date = convert_date(extract_field(description, "Deadline"))
 
     parts = [
-        "🆕 <b>UN Careers Vienna job alert</b>",
-        f"<b>{title}</b>",
+        "<b>[UN Careers]</b>",
+        escape_html(title or title_raw),
     ]
-    if published:
-        parts.append(f"Date: {published}")
-    if desc:
-        parts.append(desc)
+
+    if job_id:
+        parts.append(f"ID: {escape_html(job_id)}")
+    if level:
+        parts.append(f"Level: {escape_html(level)}")
+    if location:
+        parts.append(f"Location: {escape_html(location)}")
+    if start_date:
+        parts.append(f"Start: {escape_html(start_date)}")
+    if end_date:
+        parts.append(f"End: {escape_html(end_date)}")
     if link:
-        parts.append(f'<a href="{link}">Open job posting</a>')
+        parts.append(f'<a href="{escape_html(link)}">Open Job Posting</a>')
 
     return "\n".join(parts)
 
@@ -209,7 +270,6 @@ def main() -> int:
         except Exception as e:
             log(f"Failed to send Telegram message: {e}")
 
-    # seen 목록 길이 제한
     merged = list(dict.fromkeys(new_ids + state.get("seen_ids", [])))[:1000]
     save_state({"seen_ids": merged})
 
