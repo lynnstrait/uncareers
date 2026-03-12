@@ -267,12 +267,12 @@ def build_un_message(item: dict) -> str:
         f"<b>{escape_html(title)}</b>",
     ]
 
+    if location:
+        parts.append(f"Location: {escape_html(location)}")
     if level:
         parts.append(f"Level: {escape_html(level)}")
     if dept:
         parts.append(f"Dept: {escape_html(dept)}")
-    if location:
-        parts.append(f"Location: {escape_html(location)}")
     if open_date:
         parts.append(f"Open: {escape_html(open_date)}")
     if closing_date:
