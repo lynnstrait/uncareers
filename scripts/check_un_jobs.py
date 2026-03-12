@@ -33,7 +33,7 @@ def fetch(url: str, timeout: int = 30) -> bytes:
         url,
         headers={
             "User-Agent": "Mozilla/5.0 (compatible; RSSJobWatcher/1.0)",
-            "Accept": "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         },
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -268,15 +268,15 @@ def build_un_message(item: dict) -> str:
     ]
 
     if level:
-        parts.append(f"<code>Level: {escape_html(level)}</code>")
+        parts.append(f"Level: {escape_html(level)}")
     if dept:
-        parts.append(f"<code>Dept: {escape_html(dept)}</code>")
+        parts.append(f"Dept: {escape_html(dept)}")
     if location:
-        parts.append(f"<code>Location: {escape_html(location)}</code>")
+        parts.append(f"Location: {escape_html(location)}")
     if open_date:
-        parts.append(f"<code>Open: {escape_html(open_date)}</code>")
+        parts.append(f"Open: {escape_html(open_date)}")
     if closing_date:
-        parts.append(f"<code>Closing: {escape_html(closing_date)}</code>")
+        parts.append(f"Closing: {escape_html(closing_date)}")
     if link:
         parts.append(f'<a href="{escape_html(link)}">Job Open</a>')
 
@@ -306,7 +306,6 @@ def format_dot_date(date_str: str) -> str:
         except ValueError:
             pass
 
-    # 상세 페이지 스타일: 2026-03-30, 11:59:00 PM
     m = re.search(r"(\d{4})-(\d{2})-(\d{2})", normalized)
     if m:
         yyyy, mm, dd = m.groups()
@@ -373,6 +372,33 @@ def extract_competitive(description: str) -> str:
     return ""
 
 
+def extract_page_field(page_text: str, field_name: str) -> str:
+    pattern = rf"{re.escape(field_name)}\s*:\s*(.*?)(?:\n|$)"
+    m = re.search(pattern, page_text, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    return ""
+
+
+def fetch_iaea_detail_fields(link: str) -> dict:
+    if not link:
+        return {}
+
+    try:
+        html_bytes = fetch(link, timeout=30)
+        page_text = strip_html(html_bytes.decode("utf-8", errors="replace"))
+    except Exception as e:
+        log(f"Failed to fetch IAEA detail page: {e}")
+        return {}
+
+    return {
+        "open": extract_page_field(page_text, "Job Posting"),
+        "closing": extract_page_field(page_text, "Closing Date"),
+        "duration": extract_page_field(page_text, "Duration in Months"),
+        "competitive": extract_page_field(page_text, "Full Competitive Recruitment"),
+    }
+
+
 def build_iaea_message(item: dict) -> str:
     title_raw = (item.get("title") or "").strip()
     description = (item.get("description") or "").strip()
@@ -380,10 +406,13 @@ def build_iaea_message(item: dict) -> str:
     link = (item.get("link") or "").strip()
 
     title, level = clean_taleo_title(title_raw)
-    duration = extract_duration(description)
-    competitive = extract_competitive(description)
-    open_date = format_dot_date(published)
-    closing_date = extract_closing_date(description)
+
+    detail = fetch_iaea_detail_fields(link)
+
+    duration = detail.get("duration") or extract_duration(description)
+    competitive = detail.get("competitive") or extract_competitive(description)
+    open_date = format_dot_date(detail.get("open") or published)
+    closing_date = format_dot_date(detail.get("closing") or extract_closing_date(description))
 
     parts = [
         "<b>IAEA</b>",
@@ -392,15 +421,15 @@ def build_iaea_message(item: dict) -> str:
     ]
 
     if level:
-        parts.append(f"<code>Level: {escape_html(level)}</code>")
+        parts.append(f"Level: {escape_html(level)}")
     if duration:
-        parts.append(f"<code>Duration: {escape_html(duration)}</code>")
+        parts.append(f"Duration: {escape_html(duration)}")
     if competitive:
-        parts.append(f"<code>Competitive: {escape_html(competitive)}</code>")
+        parts.append(f"Competitive: {escape_html(competitive)}")
     if open_date:
-        parts.append(f"<code>Open: {escape_html(open_date)}</code>")
+        parts.append(f"Open: {escape_html(open_date)}")
     if closing_date:
-        parts.append(f"<code>Closing: {escape_html(closing_date)}</code>")
+        parts.append(f"Closing: {escape_html(closing_date)}")
     if link:
         parts.append(f'<a href="{escape_html(link)}">Job Open</a>')
 
