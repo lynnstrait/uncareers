@@ -3,7 +3,7 @@ name: IAEA Taleo
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "20,50 * * * *"
 
 permissions:
   contents: write
@@ -40,5 +40,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data/seen_second_rss.json
-          git diff --cached --quiet || git commit -m "Update IAEA Taleo seen state"
+          git diff --cached --quiet || git commit -m "Update IAEA seen state"
           git push
