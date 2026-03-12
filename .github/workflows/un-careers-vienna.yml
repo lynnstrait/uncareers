@@ -1,9 +1,9 @@
-name: UN Careers Vienna
+name: UN Careers
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "5,35 * * * *"
 
 permissions:
   contents: write
@@ -29,7 +29,7 @@ jobs:
           FEED_URL: ${{ secrets.UN_FEED_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          KEYWORD: VIENNA
+          KEYWORD: VIENNA,GENEVA,SEOUL
           MAX_ALERTS_PER_RUN: 10
           STATE_FILE: data/seen_jobs.json
           SOURCE_LABEL: UN Careers
