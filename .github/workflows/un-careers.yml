@@ -3,7 +3,7 @@ name: UN Careers
 on:
   workflow_dispatch:
   schedule:
-    - cron: "5,35 * * * *"
+    - cron: "5,15,25,35,45,55 * * * *"
 
 permissions:
   contents: write
