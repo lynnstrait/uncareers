@@ -17,7 +17,8 @@ FEED_URL = os.environ["FEED_URL"].strip()
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"].strip()
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"].strip()
 
-KEYWORD = os.environ.get("KEYWORD", "").strip().lower()
+RAW_KEYWORD = os.environ.get("KEYWORD", "").strip()
+KEYWORDS = [k.strip().lower() for k in RAW_KEYWORD.split(",") if k.strip()]
 MAX_ALERTS_PER_RUN = int(os.environ.get("MAX_ALERTS_PER_RUN", "10"))
 STATE_FILE = Path(os.environ.get("STATE_FILE", "data/seen_jobs.json"))
 SOURCE_LABEL = os.environ.get("SOURCE_LABEL", "UN Careers").strip()
@@ -65,7 +66,6 @@ def strip_html(text: str) -> str:
     text = re.sub(r"<[^>]+>", "\n", text)
     text = re.sub(r"\n+", "\n", text)
 
-    # IAEA RSS에서 가끔 보이는 깨짐 보정
     replacements = {
         "�셲": "’s",
         "�": "'",
@@ -172,7 +172,7 @@ def parse_rss(xml_bytes: bytes) -> list[dict]:
 
 
 def matches_keyword(item: dict) -> bool:
-    if not KEYWORD:
+    if not KEYWORDS:
         return True
 
     haystack = " ".join([
@@ -180,7 +180,8 @@ def matches_keyword(item: dict) -> bool:
         item.get("description", ""),
         item.get("link", ""),
     ]).lower()
-    return KEYWORD in haystack
+
+    return any(keyword in haystack for keyword in KEYWORDS)
 
 
 def is_real_job(item: dict) -> bool:
@@ -227,11 +228,6 @@ def telegram_send(message_html: str) -> None:
 # -------------------------
 
 def format_un_dot_date(date_str: str) -> str:
-    """
-    Example:
-    03/05/2026 00:00:00 AM (New York time)
-    -> 2026. 03. 05.
-    """
     if not date_str:
         return ""
 
@@ -259,35 +255,30 @@ def build_un_message(item: dict) -> str:
     description = (item.get("description") or "").strip()
     link = (item.get("link") or "").strip()
 
-    office = extract_un_field(description, "Department/Office")
-    job_id = extract_un_field(description, "Job ID")
     level = extract_un_field(description, "Level")
+    dept = extract_un_field(description, "Department/Office")
     location = extract_un_field(description, "Duty Station")
     open_date = format_un_dot_date(extract_un_field(description, "Posted Date"))
     closing_date = format_un_dot_date(extract_un_field(description, "Deadline"))
 
     parts = [
-        "<b>[UN Careers]</b>",
+        "<b>UN Careers</b>",
         "",
+        f"<b>{escape_html(title)}</b>",
     ]
 
-    if office:
-        parts.append(escape_html(office))
-
-    parts.append(escape_html(title))
-
-    if job_id:
-        parts.append(f"ID: {escape_html(job_id)}")
     if level:
-        parts.append(f"Level: {escape_html(level)}")
+        parts.append(f"<code>Level: {escape_html(level)}</code>")
+    if dept:
+        parts.append(f"<code>Dept: {escape_html(dept)}</code>")
     if location:
-        parts.append(f"Location: {escape_html(location)}")
+        parts.append(f"<code>Location: {escape_html(location)}</code>")
     if open_date:
-        parts.append(f"Open: {escape_html(open_date)}")
+        parts.append(f"<code>Open: {escape_html(open_date)}</code>")
     if closing_date:
-        parts.append(f"Closing: {escape_html(closing_date)}")
+        parts.append(f"<code>Closing: {escape_html(closing_date)}</code>")
     if link:
-        parts.append(f'<a href="{escape_html(link)}">URL</a>')
+        parts.append(f'<a href="{escape_html(link)}">Job Open</a>')
 
     return "\n".join(parts)
 
@@ -297,11 +288,6 @@ def build_un_message(item: dict) -> str:
 # -------------------------
 
 def format_dot_date(date_str: str) -> str:
-    """
-    Example:
-    Tue, 10 Mar 2026 09:36:03 EDT -> 2026. 03. 10.
-    Mar 10, 2026 -> 2026. 03. 10.
-    """
     if not date_str:
         return ""
 
@@ -320,18 +306,16 @@ def format_dot_date(date_str: str) -> str:
         except ValueError:
             pass
 
+    # 상세 페이지 스타일: 2026-03-30, 11:59:00 PM
+    m = re.search(r"(\d{4})-(\d{2})-(\d{2})", normalized)
+    if m:
+        yyyy, mm, dd = m.groups()
+        return f"{yyyy}. {mm}. {dd}."
+
     return date_str
 
 
 def clean_taleo_title(title: str) -> tuple[str, str]:
-    """
-    Examples:
-    'Sample Coordination and Reporting Associate(G6)'
-      -> ('Sample Coordination and Reporting Associate', 'G6')
-
-    'Associate Finance Officer (Accounts Payable)(P2) MULT'
-      -> ('Associate Finance Officer (Accounts Payable)', 'P2')
-    """
     title = title.strip()
 
     level = ""
@@ -351,13 +335,6 @@ def clean_taleo_title(title: str) -> tuple[str, str]:
 
 
 def extract_duration(description: str) -> str:
-    """
-    Looks for:
-    Duration
-    12 months
-    or
-    Duration: 12 months
-    """
     m = re.search(r"Duration\s*\n\s*([^\n]+)", description, re.IGNORECASE)
     if m:
         return m.group(1).strip()
@@ -374,11 +351,25 @@ def extract_closing_date(description: str) -> str:
         r"Closing Date[:\s]+([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})",
         r"Closing date[:\s]+([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})",
         r"Deadline[:\s]+([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})",
+        r"Closing Date[:\s]+(\d{4}-\d{2}-\d{2})",
+        r"Closing date[:\s]+(\d{4}-\d{2}-\d{2})",
     ]
     for p in patterns:
         m = re.search(p, description, re.IGNORECASE)
         if m:
             return format_dot_date(m.group(1))
+    return ""
+
+
+def extract_competitive(description: str) -> str:
+    patterns = [
+        r"Full Competitive Recruitment[:\s]+([^\n]+)",
+        r"Competitive[:\s]+([^\n]+)",
+    ]
+    for p in patterns:
+        m = re.search(p, description, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
     return ""
 
 
@@ -390,25 +381,28 @@ def build_iaea_message(item: dict) -> str:
 
     title, level = clean_taleo_title(title_raw)
     duration = extract_duration(description)
+    competitive = extract_competitive(description)
     open_date = format_dot_date(published)
     closing_date = extract_closing_date(description)
 
     parts = [
-        "<b>[IAEA]</b>",
+        "<b>IAEA</b>",
         "",
-        escape_html(title),
+        f"<b>{escape_html(title)}</b>",
     ]
 
     if level:
-        parts.append(f"Level: {escape_html(level)}")
+        parts.append(f"<code>Level: {escape_html(level)}</code>")
     if duration:
-        parts.append(f"Duration: {escape_html(duration)}")
+        parts.append(f"<code>Duration: {escape_html(duration)}</code>")
+    if competitive:
+        parts.append(f"<code>Competitive: {escape_html(competitive)}</code>")
     if open_date:
-        parts.append(f"Open: {escape_html(open_date)}")
+        parts.append(f"<code>Open: {escape_html(open_date)}</code>")
     if closing_date:
-        parts.append(f"Closing: {escape_html(closing_date)}")
+        parts.append(f"<code>Closing: {escape_html(closing_date)}</code>")
     if link:
-        parts.append(f'URL: <a href="{escape_html(link)}">Open posting</a>')
+        parts.append(f'<a href="{escape_html(link)}">Job Open</a>')
 
     return "\n".join(parts)
 
