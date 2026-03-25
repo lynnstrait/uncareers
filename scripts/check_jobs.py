@@ -594,160 +594,102 @@ class IAEAAdapter(RSSAdapter):
 class UNIDOAdapter(SourceAdapter):
     source_name = "UNIDO"
 
-    CATEGORY_CANDIDATES = [
-        "International Professionals",
-        "General Service",
-        "Consultancy opportunities",
-        "Internship Programme",
-        "Project Appointments",
-        "Junior Professional Officer Programme(JPO)",
-        "Junior Professional Officer Programme",
-        "National Professional officers",
-        "Local Support Personnel",
-    ]
-
     def normalize_link(self, link: str) -> str:
-        link = html.unescape(link or "").strip()
-        if not link:
-            return ""
-        link = urllib.parse.urljoin("https://careers.unido.org", link)
-        return clean_link(link.split("?", 1)[0].strip())
+        return clean_link((link or "").split("?", 1)[0].strip())
 
     def normalize_grade(self, value: str) -> str:
         value = normalize_space(value)
         value = value.replace("ISA -", "ISA-").replace("ISA - ", "ISA-")
         return value
 
-    def _build_title_to_links(self, html_text: str) -> dict[str, list[str]]:
-        anchor_pattern = re.compile(
-            r'<a[^>]+href="(?P<link>https://careers\.unido\.org/job/[^"]+|/job/[^"]+)"[^>]*>(?P<title>.*?)</a>',
-            re.IGNORECASE | re.DOTALL,
-        )
-
-        title_to_links: dict[str, list[str]] = {}
-
-        for match in anchor_pattern.finditer(html_text):
-            title = normalize_space(strip_html(match.group("title")))
-            link = self.normalize_link(match.group("link"))
-
-            if not title or not link:
-                continue
-
-            title_to_links.setdefault(title, []).append(link)
-
-        return title_to_links
-
-    def _extract_category(self, text: str) -> str:
-        for c in self.CATEGORY_CANDIDATES:
-            if c.lower() in text.lower():
-                return c
-        return ""
-
-    def _extract_level(self, text: str) -> str:
-        m = re.search(
-            r"\b(ISA\s*-\s*[A-Z0-9]+|ISA-[A-Z0-9]+|[PDGNLFS]\d|NOC|NOA|NOB|Intern|L2|P5|G4|G5)\b",
-            text,
-            re.IGNORECASE,
-        )
-        if not m:
-            return ""
-        return self.normalize_grade(m.group(1))
-
-    def _extract_deadline(self, text: str) -> str:
-        m = re.search(r"\b(\d{1,2}-[A-Za-z]{3}-\d{4})\b", text)
-        return m.group(1) if m else ""
-
-    def _parse_jobs_from_page_text(self, page_text: str, title_to_links: dict[str, list[str]]) -> list[JobItem]:
-        lines = [normalize_space(x) for x in page_text.split("\n")]
-        lines = [x for x in lines if x]
-
-        jobs: list[JobItem] = []
-        seen_links: set[str] = set()
-
-        i = 0
-        while i + 2 < len(lines):
-            title_line = lines[i]
-            summary_line = lines[i + 1]
-            metadata_line = lines[i + 2]
-
-            # Skip headers / noise
-            if title_line.lower() in {
-                "title",
-                "location",
-                "category",
-                "grade",
-                "application deadline",
-                "title location category grade application deadline",
-                "reset",
-            }:
-                i += 1
-                continue
-
-            # We expect:
-            # title_line = "Team Assistant (Procurement)"
-            # summary_line = "Team Assistant (Procurement) Vienna, Austria G4"
-            # metadata_line = "Vienna, Austria General Service G4 07-Apr-2026"
-            if title_line not in summary_line:
-                i += 1
-                continue
-
-            if "vienna, austria" not in metadata_line.lower():
-                i += 1
-                continue
-
-            deadline = self._extract_deadline(metadata_line)
-            if not deadline:
-                i += 1
-                continue
-
-            category = self._extract_category(metadata_line)
-            level = self._extract_level(metadata_line)
-            location = "Vienna, Austria"
-
-            # Assign the next matching link for this title
-            link_queue = title_to_links.get(title_line, [])
-            if not link_queue:
-                i += 1
-                continue
-
-            link = link_queue.pop(0)
-
-            if location.lower() != UNIDO_LOCATION_FILTER:
-                i += 1
-                continue
-
-            if link in seen_links:
-                i += 1
-                continue
-            seen_links.add(link)
-
-            jobs.append(JobItem(
-                id=link,
-                source=self.source_name,
-                title=title_line,
-                link=link,
-                location=location,
-                level=level,
-                category=category,
-                closing_date=deadline,
-                raw_date=deadline,
-            ))
-
-            i += 3
-
-        return jobs
-
     def fetch_jobs(self) -> list[JobItem]:
         html_bytes = fetch(self.source_url)
-        html_text = html_bytes.decode("utf-8", errors="replace")
-        page_text = strip_html(html_text)
+        text = html_bytes.decode("utf-8", errors="replace")
+        page_text = strip_html(text)
 
         m = re.search(r"Results\s+\d+\s+[–-]\s+\d+\s+of\s+(\d+)", page_text, re.IGNORECASE)
         if m:
             log(f"UNIDO page reports total results: {m.group(1)}")
 
-        title_to_links = self._build_title_to_links(html_text)
-        jobs = self._parse_jobs_from_page_text(page_text, title_to_links)
+        pattern = re.compile(
+            r'<a[^>]+href="(?P<link>https://careers\.unido\.org/job/[^"]+|/job/[^"]+)"[^>]*>(?P<title>.*?)</a>',
+            re.IGNORECASE | re.DOTALL,
+        )
+
+        matches = list(pattern.finditer(text))
+        jobs = []
+        seen = set()
+
+        category_candidates = [
+            "International Professionals",
+            "General Service",
+            "Consultancy opportunities",
+            "Internship Programme",
+            "Project Appointments",
+            "Junior Professional Officer Programme(JPO)",
+            "Junior Professional Officer Programme",
+            "National Professional officers",
+            "Local Support Personnel",
+        ]
+
+        for idx, match in enumerate(matches):
+            raw_link = html.unescape(match.group("link")).strip()
+            link = urllib.parse.urljoin("https://careers.unido.org", raw_link)
+            link = self.normalize_link(link)
+
+            title = strip_html(match.group("title"))
+            title = normalize_space(title)
+
+            if not title:
+                continue
+
+            start = match.end()
+            end = matches[idx + 1].start() if idx + 1 < len(matches) else min(len(text), start + 1500)
+            block = strip_html(text[start:end])
+            block = normalize_space(block)
+
+            location_match = re.search(r"\b([A-Za-z .'\-]+,\s*[A-Za-z .'\-]+)\b", block)
+            location = normalize_space(location_match.group(1)) if location_match else ""
+
+            category = ""
+            for c in category_candidates:
+                if c.lower() in block.lower():
+                    category = c
+                    break
+
+            level = ""
+            m_level = re.search(
+                r"\b(ISA\s*-\s*[A-Z0-9]+|ISA-[A-Z0-9]+|[PDGNLFS]\d|D1|D2|Intern)\b",
+                block,
+                re.IGNORECASE,
+            )
+            if m_level:
+                level = self.normalize_grade(m_level.group(1))
+
+            closing_date = ""
+            m_deadline = re.search(r"\b(\d{1,2}-[A-Za-z]{3}-\d{4})\b", block)
+            if m_deadline:
+                closing_date = m_deadline.group(1)
+
+            if location.lower() != UNIDO_LOCATION_FILTER:
+                continue
+
+            key = (title.lower(), location.lower(), level.lower(), closing_date.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+
+            jobs.append(JobItem(
+                id=f"unido:{title}|{location}|{level}|{closing_date}",
+                source=self.source_name,
+                title=title,
+                link=link,
+                location=location,
+                level=level,
+                category=category,
+                closing_date=closing_date,
+                raw_date=closing_date,
+            ))
 
         return jobs
 
@@ -770,7 +712,6 @@ class UNIDOAdapter(SourceAdapter):
             parts.append(f'<a href="{escape_html(job.link)}">Job Open</a>')
 
         return "\n".join(parts)
-
 
 # =========================================================
 # CTBTO adapter
