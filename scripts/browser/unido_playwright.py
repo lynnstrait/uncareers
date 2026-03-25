@@ -122,7 +122,8 @@ def build_message(job: JobItem) -> str:
     if getattr(job, "level", ""):
         parts.append(f"Level: {escape_html(job.level)}")
     if getattr(job, "location", ""):
-        parts.append(f"Duty: {escape_html(job.location)}")
+        duty_display = "Vienna" if job.location.lower() == "vienna, austria" else job.location
+        parts.append(f"Duty: {escape_html(duty_display)}")
     if getattr(job, "duration", ""):
         parts.append(f"Duration: {escape_html(job.duration)}")
     if getattr(job, "annual_salary", ""):
@@ -131,7 +132,7 @@ def build_message(job: JobItem) -> str:
         parts.append(f"Closing: {escape_html(format_dot_date(job.closing_date))}")
     if getattr(job, "link", ""):
         parts.append(f'<a href="{escape_html(job.link)}">Job Open</a>')
-
+        
     return "\n".join(parts)
 
 
