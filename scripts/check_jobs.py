@@ -35,7 +35,7 @@ MAX_ALERTS_PER_RUN = int(os.environ.get("MAX_ALERTS_PER_RUN", "10"))
 STATE_FILE = Path(os.environ.get("STATE_FILE", "data/seen_jobs.json"))
 
 UNIDO_LOCATION_FILTER = os.environ.get("UNIDO_LOCATION_FILTER", "Vienna, Austria").strip().lower()
-CTBTO_LOCATION_FILTER = os.environ.get("CTBTO_LOCATION_FILTER", "Vienna").strip().lower()
+CTBTO_LOCATION_FILTER = os.environ.get("CTBTO_LOCATION_FILTER", "").strip().lower()
 
 DISABLE_WEB_PAGE_PREVIEW = os.environ.get("DISABLE_WEB_PAGE_PREVIEW", "false").strip().lower()
 DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() == "true"
