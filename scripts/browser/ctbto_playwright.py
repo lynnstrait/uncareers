@@ -10,11 +10,9 @@ if str(ROOT) not in sys.path:
 
 from playwright.sync_api import sync_playwright
 
-from scripts.common.helpers import log, normalize_space, escape_html, format_dot_date, parse_any_date_to_ts
-from scripts.common.models import JobItem
+from scripts.common.helpers import log, normalize_space, escape_html, format_dot_date
 from scripts.common.state import load_state, save_state
 from scripts.common.telegram_utils import telegram_send
-
 
 
 SOURCE_LABEL = "CTBTO"
@@ -78,15 +76,84 @@ def fetch_detail_text(url: str) -> str:
         page.wait_for_timeout(5000)
         text = page.locator("body").inner_text()
         browser.close()
-        return normalize_space(text)
+        return text
 
 
 def first_match(text: str, patterns: list[str]) -> str:
     for p in patterns:
-        m = re.search(p, text, re.I)
+        m = re.search(p, text, re.I | re.S)
         if m:
             return normalize_space(m.group(1))
     return ""
+
+
+def clean_title(title: str, req_id: str) -> str:
+    title = normalize_space(title)
+    if not title:
+        return f"CTBTO Vacancy {req_id}"
+
+    # remove leading generic labels
+    title = re.sub(r"^(job title|title)\s*[:\-]?\s*", "", title, flags=re.I).strip()
+
+    # if still generic, fall back
+    if title.lower() in {"ctbto vacancy", "vacancy"}:
+        return f"CTBTO Vacancy {req_id}"
+
+    return title
+
+
+def clean_section(value: str) -> str:
+    value = normalize_space(value)
+    if not value:
+        return ""
+
+    # prefer explicit Section capture if present
+    m = re.search(r"([A-Za-z0-9&,\-()/' ]+Section)", value, re.I)
+    if m:
+        return normalize_space(m.group(1))
+
+    # strip leading Division/Office/Unit labels if mixed in one line
+    value = re.sub(r"\bDivision[:\s].*?(?=Section[:\s]|$)", "", value, flags=re.I).strip()
+    value = re.sub(r"\bOffice[:\s].*?(?=Section[:\s]|$)", "", value, flags=re.I).strip()
+    value = re.sub(r"\bUnit[:\s].*$", "", value, flags=re.I).strip()
+
+    # remove explicit Section label text
+    value = re.sub(r"^Section[:\s]*", "", value, flags=re.I).strip()
+
+    return normalize_space(value)
+
+
+def clean_closing(value: str) -> str:
+    value = normalize_space(value)
+    if not value:
+        return ""
+
+    # keep only the date part, drop "Vacancy Reference..." etc.
+    m = re.search(
+        r"([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4}|\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}|\d{4}-\d{2}-\d{2})",
+        value,
+        re.I,
+    )
+    if m:
+        return normalize_space(m.group(1))
+
+    return value
+
+
+def clean_open(value: str) -> str:
+    value = normalize_space(value)
+    if not value:
+        return ""
+
+    m = re.search(
+        r"([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4}|\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}|\d{4}-\d{2}-\d{2})",
+        value,
+        re.I,
+    )
+    if m:
+        return normalize_space(m.group(1))
+
+    return value
 
 
 def fetch_ctbto_jobs() -> list[dict]:
@@ -112,45 +179,48 @@ def fetch_ctbto_jobs() -> list[dict]:
         if "is no longer available for application" in lowered:
             continue
 
-        title = first_match(text, [
-            r"Job Title[:\s]+(.+?)(?:Grade Level|Division|Type of Appointment|Date of Issuance|Deadline for Applications)",
-            r"Title[:\s]+(.+?)(?:Grade Level|Division|Type of Appointment|Date of Issuance|Deadline for Applications)",
+        title_raw = first_match(text, [
+            r"Job Title[:\s]+(.+?)(?:Grade Level|Grade|Division|Department|Section|Type of Appointment|Date of Issuance|Date of Issue|Deadline for Applications|Deadline)",
+            r"Title[:\s]+(.+?)(?:Grade Level|Grade|Division|Department|Section|Type of Appointment|Date of Issuance|Date of Issue|Deadline for Applications|Deadline)",
         ])
+        title = clean_title(title_raw, req_id)
 
         level = first_match(text, [
-            r"Grade Level[:\s]+(.+?)(?:Division|Type of Appointment|Date of Issuance|Deadline for Applications)",
-            r"Grade[:\s]+(.+?)(?:Division|Type of Appointment|Date of Issuance|Deadline for Applications)",
+            r"Grade Level[:\s]+(.+?)(?:Division|Department|Section|Type of Appointment|Date of Issuance|Date of Issue|Deadline for Applications|Deadline)",
+            r"Grade[:\s]+(.+?)(?:Division|Department|Section|Type of Appointment|Date of Issuance|Date of Issue|Deadline for Applications|Deadline)",
         ])
 
-        dept = first_match(text, [
-            r"Division[:\s]+(.+?)(?:Type of Appointment|Date of Issuance|Deadline for Applications)",
-            r"Department[:\s]+(.+?)(?:Type of Appointment|Date of Issuance|Deadline for Applications)",
+        # We normalize everything into Sect:
+        section_raw = first_match(text, [
+            r"Section[:\s]+(.+?)(?:Unit|Type of Appointment|Date of Issuance|Date of Issue|Deadline for Applications|Deadline)",
+            r"Division[:\s]+(.+?)(?:Section|Unit|Type of Appointment|Date of Issuance|Date of Issue|Deadline for Applications|Deadline)",
+            r"Department[:\s]+(.+?)(?:Section|Unit|Type of Appointment|Date of Issuance|Date of Issue|Deadline for Applications|Deadline)",
         ])
+        section = clean_section(section_raw)
 
         appointment_type = first_match(text, [
-            r"Type of Appointment[:\s]+(.+?)(?:Date of Issuance|Deadline for Applications)",
+            r"Type of Appointment[:\s]+(.+?)(?:Date of Issuance|Date of Issue|Deadline for Applications|Deadline)",
         ])
 
-        open_date = first_match(text, [
-            r"Date of Issuance[:\s]+(.+?)(?:Deadline for Applications|Reporting Date)",
-            r"Date of Issue[:\s]+(.+?)(?:Deadline for Applications|Reporting Date)",
+        open_raw = first_match(text, [
+            r"Date of Issuance[:\s]+(.+?)(?:Deadline for Applications|Deadline|Reporting Date|Please note|$)",
+            r"Date of Issue[:\s]+(.+?)(?:Deadline for Applications|Deadline|Reporting Date|Please note|$)",
         ])
+        open_date = clean_open(open_raw)
 
-        closing_date = first_match(text, [
+        closing_raw = first_match(text, [
             r"Deadline for Applications[:\s]+(.+?)(?:Reporting Date|Please note|$)",
             r"Deadline[:\s]+(.+?)(?:Reporting Date|Please note|$)",
         ])
-
-        if not title:
-            title = f"CTBTO Vacancy {req_id}"
+        closing_date = clean_closing(closing_raw)
 
         jobs.append({
             "id": f"ctbto:{req_id}",
             "title": title,
             "link": link,
-            "level": level,
-            "department": dept,
-            "appointment_type": appointment_type,
+            "level": normalize_space(level),
+            "section": section,
+            "appointment_type": normalize_space(appointment_type),
             "open_date": open_date,
             "closing_date": closing_date,
         })
@@ -160,23 +230,23 @@ def fetch_ctbto_jobs() -> list[dict]:
 
 def build_message(job: dict) -> str:
     parts = [
-        "<b>CTBTO</b>",
+        f"<b>{escape_html(SOURCE_LABEL)}</b>",
         "",
-        f"<b>{job['title']}</b>",
+        f"<b>{escape_html(job['title'])}</b>",
     ]
 
     if job.get("level"):
-        parts.append(f"Level: {job['level']}")
-    if job.get("department"):
-        parts.append(f"Dept: {job['department']}")
+        parts.append(f"Level: {escape_html(job['level'])}")
+    if job.get("section"):
+        parts.append(f"Sect: {escape_html(job['section'])}")
     if job.get("appointment_type"):
-        parts.append(f"Type: {job['appointment_type']}")
+        parts.append(f"Type: {escape_html(job['appointment_type'])}")
     if job.get("open_date"):
-        parts.append(f"Open: {format_dot_date(job['open_date'])}")
+        parts.append(f"Open: {escape_html(format_dot_date(job['open_date']))}")
     if job.get("closing_date"):
-        parts.append(f"Closing: {format_dot_date(job['closing_date'])}")
+        parts.append(f"Closing: {escape_html(format_dot_date(job['closing_date']))}")
     if job.get("link"):
-        parts.append(f'<a href="{job["link"]}">Job Open</a>')
+        parts.append(f'<a href="{escape_html(job["link"])}">Job Open</a>')
 
     return "\n".join(parts)
 
@@ -217,9 +287,9 @@ def main() -> int:
         try:
             message_html = build_message(job)
             telegram_send(
-                bot_token=TELEGRAM_BOT_TOKEN,
-                chat_id=TELEGRAM_CHAT_ID,
-                message_html=message_html,
+                TELEGRAM_BOT_TOKEN,
+                TELEGRAM_CHAT_ID,
+                message_html,
                 dry_run=DRY_RUN,
             )
             alerts_sent += 1
