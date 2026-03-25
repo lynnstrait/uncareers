@@ -51,9 +51,9 @@ def extract_grade(text: str) -> str:
     value = first_match(text, [
         r"Grade[:\s]+([^\n]+)",
         r"Grade Level[:\s]+([^\n]+)",
-        r"\b(ISA\s*-\s*[A-Z0-9]+|ISA-[A-Z0-9]+|[PDGNLFS]\d|D1|D2|Intern|L2|P5|G4|G5)\b",
+        r"\b(ISA\s*-\s*[A-Z0-9]+|ISA-[A-Z0-9]+|[PDGNLFS]\d|D1|D2|Intern|L2|P5|G4|G5|NOC|NOA)\b",
     ])
-    return value.replace("ISA -", "ISA-").replace("ISA - ", "ISA-")
+    return value.replace("ISA -", "ISA-").replace("ISA - ", "ISA-") if value else ""
 
 
 def extract_duty_station(text: str) -> str:
@@ -62,24 +62,45 @@ def extract_duty_station(text: str) -> str:
         r"Location[:\s]+([^\n]+)",
     ])
     if value:
+        value = normalize_space(value)
+        if value.lower() == "vienna":
+            return "Vienna, Austria"
         return value
 
     m = re.search(r"\b([A-Za-z .'\-]+,\s*[A-Za-z .'\-]+)\b", text)
-    return normalize_space(m.group(1)) if m else ""
+    if m:
+        return normalize_space(m.group(1))
+
+    m2 = re.search(r"Duty Station[:\s]+([A-Za-z .'\-]+)", text, re.I)
+    if m2:
+        value = normalize_space(m2.group(1))
+        if value.lower() == "vienna":
+            return "Vienna, Austria"
+        return value
+
+    return ""
 
 
 def extract_duration(text: str) -> str:
     return first_match(text, [
-        r"Duration[:\s]+([^\n]+)",
         r"Contract Duration[:\s]+([^\n]+)",
+        r"Internship Duration[:\s]+([^\n]+)",
         r"Duration of Appointment[:\s]+([^\n]+)",
+        r"Duration[:\s]+([^\n]+)",
+    ])
+
+
+def extract_annual_salary(text: str) -> str:
+    return first_match(text, [
+        r"Indicative Minimum Net Annual Salary[:\s]+([^\n]+)",
+        r"Annual Salary[:\s]+([^\n]+)",
     ])
 
 
 def extract_application_deadline(text: str) -> str:
-    # Prefer labeled field first
     value = first_match(text, [
         r"Application Deadline[:\s]+([^\n]+)",
+        r"Application deadline[:\s]+([^\n]+)",
         r"Deadline[:\s]+([^\n]+)",
     ])
     if value:
@@ -96,13 +117,19 @@ def build_message(job: JobItem) -> str:
         f"<b>{escape_html(SOURCE_LABEL)}</b>",
         "",
         f"<b>{escape_html(job.title)}</b>",
-        f"Level: {escape_html(job.level or '-')}",
-        f"Duty: {escape_html(job.location or '-')}",
-        f"Duration: {escape_html(job.duration or '-')}",
-        f"Closing: {escape_html(format_dot_date(job.closing_date) if job.closing_date else '-')}",
     ]
 
-    if job.link:
+    if getattr(job, "level", ""):
+        parts.append(f"Level: {escape_html(job.level)}")
+    if getattr(job, "location", ""):
+        parts.append(f"Duty: {escape_html(job.location)}")
+    if getattr(job, "duration", ""):
+        parts.append(f"Duration: {escape_html(job.duration)}")
+    if getattr(job, "annual_salary", ""):
+        parts.append(f"Annual Salary: {escape_html(job.annual_salary)}")
+    if getattr(job, "closing_date", ""):
+        parts.append(f"Closing: {escape_html(format_dot_date(job.closing_date))}")
+    if getattr(job, "link", ""):
         parts.append(f'<a href="{escape_html(job.link)}">Job Open</a>')
 
     return "\n".join(parts)
@@ -167,22 +194,18 @@ def fetch_detail_fields(browser, title: str, link: str) -> JobItem | None:
     finally:
         page.close()
 
-    log(f"--- UNIDO DETAIL START: {title} ---")
-    log(raw_text[:2500])
-    log(f"--- UNIDO DETAIL END: {title} ---")
-
-    # keep both raw text and normalized text
     text = normalize_space(raw_text)
 
     duty = extract_duty_station(raw_text) or extract_duty_station(text)
-    if duty.lower() != UNIDO_LOCATION_FILTER:
+    if "vienna" not in duty.lower():
         return None
 
     grade = extract_grade(raw_text) or extract_grade(text)
     duration = extract_duration(raw_text) or extract_duration(text)
+    annual_salary = extract_annual_salary(raw_text) or extract_annual_salary(text)
     deadline = extract_application_deadline(raw_text) or extract_application_deadline(text)
 
-    return JobItem(
+    job = JobItem(
         id=link,
         source=SOURCE_LABEL,
         title=title,
@@ -193,6 +216,10 @@ def fetch_detail_fields(browser, title: str, link: str) -> JobItem | None:
         closing_date=deadline,
         raw_date=deadline,
     )
+
+    # Add dynamic field used by build_message
+    job.annual_salary = annual_salary
+    return job
 
 
 def fetch_jobs() -> list[JobItem]:
@@ -214,7 +241,6 @@ def fetch_jobs() -> list[JobItem]:
 
         browser.close()
 
-    # final dedupe by link
     deduped: list[JobItem] = []
     seen = set()
     for job in jobs:
