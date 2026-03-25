@@ -7,6 +7,10 @@ from email.utils import parsedate_to_datetime
 import feedparser
 
 
+def log(msg: str) -> None:
+    print(msg, flush=True)
+
+
 def fetch(url: str, timeout: int = 30) -> bytes:
     req = urllib.request.Request(
         url,
@@ -79,6 +83,34 @@ def format_dot_date(date_str: str) -> str:
     return date_str
 
 
+def parse_any_date_to_ts(value: str) -> float:
+    if not value:
+        return 0.0
+
+    normalized = " ".join(value.split())
+
+    try:
+        return parsedate_to_datetime(normalized).timestamp()
+    except Exception:
+        pass
+
+    for fmt in (
+        "%b %d, %Y",
+        "%B %d, %Y",
+        "%d-%b-%Y",
+        "%d-%B-%Y",
+        "%d/%m/%Y",
+        "%m/%d/%Y",
+        "%Y-%m-%d",
+    ):
+        try:
+            return datetime.strptime(normalized, fmt).timestamp()
+        except Exception:
+            pass
+
+    return 0.0
+
+
 def extract_tag(block: str, tag: str) -> str:
     m = re.search(rf"<{tag}\b[^>]*>(.*?)</{tag}>", block, re.IGNORECASE | re.DOTALL)
     if not m:
@@ -111,6 +143,9 @@ def parse_rss_fallback(xml_bytes: bytes) -> list[dict]:
 
 def parse_rss(xml_bytes: bytes) -> list[dict]:
     feed = feedparser.parse(xml_bytes)
+
+    if getattr(feed, "bozo", 0):
+        log(f"Feed parser warning: {feed.bozo_exception}")
 
     items = []
     for entry in feed.entries:
