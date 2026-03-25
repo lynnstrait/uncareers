@@ -713,6 +713,7 @@ class UNIDOAdapter(SourceAdapter):
 
         return "\n".join(parts)
 
+
 # =========================================================
 # CTBTO adapter
 # =========================================================
@@ -757,48 +758,44 @@ class CTBTOAdapter(SourceAdapter):
         if "is no longer available for application" in lowered:
             return None
 
-        patterns = {
-            "title": [
-                r"Job title[:\s]+([^\n]+)",
-                r"Title[:\s]+([^\n]+)",
-                r"#\s*([^\n]+)",
-            ],
-            "level": [
-                r"Grade Level[:\s]+([^\n]+)",
-                r"Grade[:\s]+([^\n]+)",
-            ],
-            "dept": [
-                r"Division[:\s]+([^\n]+)",
-                r"Department[:\s]+([^\n]+)",
-            ],
-            "appointment_type": [
-                r"Type of Appointment[:\s]+([^\n]+)",
-            ],
-            "open_date": [
-                r"Date of Issuance[:\s]+([^\n]+)",
-                r"Date of Issue[:\s]+([^\n]+)",
-                r"Date Posted[:\s]+([^\n]+)",
-            ],
-            "closing_date": [
-                r"Deadline for Applications[:\s]+([^\n]+)",
-                r"Deadline[:\s]+([^\n]+)",
-                r"Application deadline[:\s]+([^\n]+)",
-            ],
-        }
-
-        def first_match(candidates: list[str]) -> str:
-            for p in candidates:
+        def first_match(patterns: list[str]) -> str:
+            for p in patterns:
                 m = re.search(p, page_text, re.IGNORECASE)
                 if m:
                     return m.group(1).strip()
             return ""
 
-        title = first_match(patterns["title"])
-        level = first_match(patterns["level"])
-        dept = first_match(patterns["dept"])
-        appointment_type = first_match(patterns["appointment_type"])
-        open_date = first_match(patterns["open_date"])
-        closing_date = first_match(patterns["closing_date"])
+        title = first_match([
+            r"Job title[:\s]+([^\n]+)",
+            r"Title[:\s]+([^\n]+)",
+            r"#\s*([^\n]+)",
+        ])
+
+        level = first_match([
+            r"Grade Level[:\s]+([^\n]+)",
+            r"Grade[:\s]+([^\n]+)",
+        ])
+
+        dept = first_match([
+            r"Division[:\s]+([^\n]+)",
+            r"Department[:\s]+([^\n]+)",
+        ])
+
+        appointment_type = first_match([
+            r"Type of Appointment[:\s]+([^\n]+)",
+        ])
+
+        open_date = first_match([
+            r"Date of Issuance[:\s]+([^\n]+)",
+            r"Date of Issue[:\s]+([^\n]+)",
+            r"Date Posted[:\s]+([^\n]+)",
+        ])
+
+        closing_date = first_match([
+            r"Deadline for Applications[:\s]+([^\n]+)",
+            r"Deadline[:\s]+([^\n]+)",
+            r"Application deadline[:\s]+([^\n]+)",
+        ])
 
         location = "Vienna, Austria" if re.search(r"vienna", page_text, re.IGNORECASE) else ""
 
@@ -821,31 +818,22 @@ class CTBTOAdapter(SourceAdapter):
             raw_date=closing_date or open_date,
         )
 
-    def parse_embedded_links(self, text: str) -> list[str]:
+    def extract_successfactors_links(self, text: str) -> list[str]:
         links = set()
 
         for m in re.finditer(
-            r'(https://career2\.successfactors\.eu/career\?[^"\s<>]+career_job_req_id=\d+[^"\s<>]*)',
+            r'https://career2\.successfactors\.eu/career\?[^"\s<>]+career_job_req_id=\d+[^"\s<>]*',
             text,
             re.IGNORECASE,
         ):
-            links.add(self.normalize_sf_link(m.group(1)))
+            links.add(self.normalize_sf_link(m.group(0)))
 
         for m in re.finditer(
-            r'(/career\?[^"\s<>]+career_job_req_id=\d+[^"\s<>]*)',
+            r'/career\?[^"\s<>]+career_job_req_id=\d+[^"\s<>]*',
             text,
             re.IGNORECASE,
         ):
-            links.add(self.normalize_sf_link(m.group(1)))
-
-        for req_id in set(re.findall(r'"career_job_req_id"\s*:\s*"?(\\?\d+)"?', text, re.IGNORECASE)):
-            rid = req_id.replace("\\", "")
-            link = (
-                "https://career2.successfactors.eu/career?"
-                f"company=ctbtoprepa&career_ns=job_listing&navBarLevel=JOB_SEARCH"
-                f"&career_job_req_id={rid}&selected_lang=en_GB&rcm_site_locale=en_GB"
-            )
-            links.add(self.normalize_sf_link(link))
+            links.add(self.normalize_sf_link(m.group(0)))
 
         for req_id in set(re.findall(r'career_job_req_id[=:\\/"]+(\d+)', text, re.IGNORECASE)):
             link = (
@@ -857,117 +845,35 @@ class CTBTOAdapter(SourceAdapter):
 
         return [x for x in links if x]
 
-    def parse_summary_blocks(self, text: str) -> list[JobItem]:
-        jobs = []
-
-        block_pattern = re.compile(
-            r'(?P<title>There\s+is\s+a\s+position\s+open\s+for\s+.*?)(?=There\s+is\s+a\s+position\s+open\s+for\s+|\Z)',
-            re.IGNORECASE | re.DOTALL,
-        )
-
-        for block_match in block_pattern.finditer(text):
-            block = normalize_space(strip_html(block_match.group(0)))
-
-            title = ""
-            m_title = re.search(r"There\s+is\s+a\s+position\s+open\s+for\s+(.+?)\s+at\s+the", block, re.IGNORECASE)
-            if m_title:
-                title = m_title.group(1).strip()
-
-            level = ""
-            m_level = re.search(r"Grade Level[:\s]+([^\n]+?)(?:Division:|Section:|Unit:|Type of Appointment:|Date of Issuance:|Deadline for Applications:)", block, re.IGNORECASE)
-            if m_level:
-                level = normalize_space(m_level.group(1))
-
-            dept = ""
-            m_div = re.search(r"Division[:\s]+([^\n]+?)(?:Section:|Unit:|Type of Appointment:|Date of Issuance:|Deadline for Applications:)", block, re.IGNORECASE)
-            if m_div:
-                dept = normalize_space(m_div.group(1))
-
-            appointment_type = ""
-            m_type = re.search(r"Type of Appointment[:\s]+([^\n]+?)(?:Date of Issuance:|Deadline for Applications:)", block, re.IGNORECASE)
-            if m_type:
-                appointment_type = normalize_space(m_type.group(1))
-
-            open_date = ""
-            m_open = re.search(r"Date of Issuance[:\s]+([^\n]+?)(?:Deadline for Applications:|Vacancy Reference|Reporting Date:)", block, re.IGNORECASE)
-            if m_open:
-                open_date = normalize_space(m_open.group(1))
-
-            closing_date = ""
-            m_close = re.search(r"Deadline for Applications[:\s]+([^\n]+?)(?:Vacancy Reference|Reporting Date:|Please note)", block, re.IGNORECASE)
-            if m_close:
-                closing_date = normalize_space(m_close.group(1))
-
-            req_id = ""
-            m_req = re.search(r"VA ID[:\s]+(\d+)", block, re.IGNORECASE)
-            if m_req:
-                req_id = m_req.group(1).strip()
-
-            link = ""
-            m_link = re.search(r"(https://career2\.successfactors\.eu/career\?[^ ]+career_job_req_id=\d+[^ ]*)", block, re.IGNORECASE)
-            if m_link:
-                link = self.normalize_sf_link(m_link.group(1))
-            elif req_id:
-                link = self.normalize_sf_link(
-                    "https://career2.successfactors.eu/career?"
-                    f"company=ctbtoprepa&career_ns=job_listing&navBarLevel=JOB_SEARCH"
-                    f"&career_job_req_id={req_id}&selected_lang=en_GB&rcm_site_locale=en_GB"
-                )
-
-            if not title:
-                continue
-
-            jobs.append(JobItem(
-                id=f"ctbto:{req_id}" if req_id else f"ctbto:{title}",
-                source=self.source_name,
-                title=title,
-                link=link,
-                description=block[:1500],
-                location="Vienna, Austria",
-                level=level,
-                department=dept,
-                appointment_type=appointment_type,
-                open_date=open_date,
-                closing_date=closing_date,
-                raw_date=closing_date or open_date,
-            ))
-
-        return jobs
-
     def fetch_jobs(self) -> list[JobItem]:
         html_bytes = fetch(self.source_url)
         text = html_bytes.decode("utf-8", errors="replace")
 
-        links = self.parse_embedded_links(text)
+        links = self.extract_successfactors_links(text)
+        log(f"CTBTO discovered links: {len(links)}")
+
         jobs = []
+        seen_ids = set()
 
-        if links:
-            log(f"CTBTO discovered detail links: {len(links)}")
-            seen_ids = set()
-            for link in links:
-                job = self.parse_detail_page(link)
-                if not job:
-                    continue
-                if CTBTO_LOCATION_FILTER and CTBTO_LOCATION_FILTER not in (job.location or "").lower():
-                    continue
-                if job.id in seen_ids:
-                    continue
-                seen_ids.add(job.id)
-                jobs.append(job)
+        for link in links:
+            job = self.parse_detail_page(link)
+            if not job:
+                continue
+            if CTBTO_LOCATION_FILTER and CTBTO_LOCATION_FILTER not in (job.location or "").lower():
+                continue
+            if job.id in seen_ids:
+                continue
+            seen_ids.add(job.id)
+            jobs.append(job)
 
-            if jobs:
-                return jobs
-
-        return self.parse_summary_blocks(text)
+        return jobs
 
     def is_real_job(self, job: JobItem) -> bool:
         if not super().is_real_job(job):
             return False
 
         title = (job.title or "").strip().lower()
-        if title == "loading":
-            return False
-        if title == "career opportunities":
+        if title in {"loading", "career opportunities", "ctbto vacancy"}:
             return False
         return True
 
@@ -1068,19 +974,20 @@ def main() -> int:
     new_ids = []
 
     for job in new_jobs[:MAX_ALERTS_PER_RUN]:
-    try:
-        telegram_send(adapter.build_message(job))
-        alerts_sent += 1
+        try:
+            telegram_send(adapter.build_message(job))
+            alerts_sent += 1
 
-        if not DRY_RUN:
-            new_ids.append(job.id)
+            if not DRY_RUN:
+                new_ids.append(job.id)
 
-        time.sleep(1)
-    except Exception as e:
-        log(f"Failed to send Telegram message: {e}")
+            time.sleep(1)
+        except Exception as e:
+            log(f"Failed to send Telegram message: {e}")
 
-    merged = list(dict.fromkeys(new_ids + state.get("seen_ids", [])))[:1000]
-    save_state({"seen_ids": merged})
+    if not DRY_RUN:
+        merged = list(dict.fromkeys(new_ids + state.get("seen_ids", [])))[:1000]
+        save_state({"seen_ids": merged})
 
     log(f"Alerts sent: {alerts_sent}")
     return 0
