@@ -39,22 +39,17 @@ DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() == "true"
 BOOTSTRAP_MODE = os.environ.get("BOOTSTRAP_MODE", "false").strip().lower() == "true"
 
 
-def extract_category(text: str) -> str:
-    candidates = [
-        "International Professionals",
-        "General Service",
-        "Consultancy opportunities",
-        "Internship Programme",
-        "Project Appointments",
-        "Junior Professional Officer Programme(JPO)",
-        "Junior Professional Officer Programme",
-        "National Professional officers",
-        "Local Support Personnel",
-    ]
-    for c in candidates:
-        if c.lower() in text.lower():
-            return c
-    return ""
+CATEGORY_CANDIDATES = [
+    "International Professionals",
+    "General Service",
+    "Consultancy opportunities",
+    "Internship Programme",
+    "Project Appointments",
+    "Junior Professional Officer Programme(JPO)",
+    "Junior Professional Officer Programme",
+    "National Professional officers",
+    "Local Support Personnel",
+]
 
 
 def extract_grade(text: str) -> str:
@@ -91,122 +86,97 @@ def extract_application_deadline(text: str) -> str:
 
 
 def build_message(job: JobItem) -> str:
+    level = job.level or "-"
+    duty = job.location or "-"
+    duration = job.duration or "-"
+    closing = format_dot_date(job.closing_date) if job.closing_date else "-"
+
     parts = [
         f"<b>{escape_html(SOURCE_LABEL)}</b>",
         "",
         f"<b>{escape_html(job.title)}</b>",
+        f"Level: {escape_html(level)}",
+        f"Duty: {escape_html(duty)}",
+        f"Duration: {escape_html(duration)}",
+        f"Closing: {escape_html(closing)}",
     ]
 
-    if job.level:
-        parts.append(f"Level: {escape_html(job.level)}")
-    if job.location:
-        parts.append(f"Duty: {escape_html(job.location)}")
-    if job.duration:
-        parts.append(f"Duration: {escape_html(job.duration)}")
-    if job.closing_date:
-        parts.append(f"Closing: {escape_html(format_dot_date(job.closing_date))}")
     if job.link:
         parts.append(f'<a href="{escape_html(job.link)}">Job Open</a>')
 
     return "\n".join(parts)
 
 
-def fetch_jobs() -> list[JobItem]:
+def fetch_rendered_page() -> tuple[str, str]:
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
-        page.goto(SOURCE_URL, wait_until="domcontentloaded", timeout=90000)
+        page.goto(SOURCE_URL, wait_until="networkidle", timeout=90000)
         page.wait_for_timeout(6000)
 
-        records = page.eval_on_selector_all(
-            'a[href*="/job/"]',
-            """
-            (anchors) => {
-              function norm(s) {
-                return (s || "").replace(/\\s+/g, " ").trim();
-              }
-
-              const out = [];
-
-              for (const a of anchors) {
-                const href = a.getAttribute("href") || "";
-                const title = norm(a.innerText || a.textContent || "");
-                if (!href || !title) continue;
-
-                let node = a;
-                let bestText = "";
-                let depth = 0;
-
-                while (node && depth < 8) {
-                  const txt = norm(node.innerText || node.textContent || "");
-                  if (txt && txt.toLowerCase().includes("vienna, austria")) {
-                    if (!bestText || txt.length < bestText.length) {
-                      bestText = txt;
-                    }
-                  }
-                  node = node.parentElement;
-                  depth += 1;
-                }
-
-                // Fallback: look at nearby siblings if ancestor search failed
-                if (!bestText && a.parentElement) {
-                  let txts = [];
-                  let sib = a.parentElement.previousElementSibling;
-                  let count = 0;
-                  while (sib && count < 3) {
-                    txts.push(norm(sib.innerText || sib.textContent || ""));
-                    sib = sib.previousElementSibling;
-                    count += 1;
-                  }
-                  sib = a.parentElement.nextElementSibling;
-                  count = 0;
-                  while (sib && count < 3) {
-                    txts.push(norm(sib.innerText || sib.textContent || ""));
-                    sib = sib.nextElementSibling;
-                    count += 1;
-                  }
-                  const merged = norm(txts.join(" | "));
-                  if (merged.toLowerCase().includes("vienna, austria")) {
-                    bestText = merged;
-                  }
-                }
-
-                out.push({
-                  href,
-                  title,
-                  context: bestText
-                });
-              }
-
-              return out;
-            }
-            """,
-        )
+        html = page.content()
+        body_text = page.locator("body").inner_text()
 
         browser.close()
+        return html, body_text
 
-    jobs: list[JobItem] = []
-    seen_links = set()
 
-    for rec in records:
-        href = normalize_space(rec.get("href", ""))
-        title = normalize_space(rec.get("title", ""))
-        context = normalize_space(rec.get("context", ""))
+def build_title_to_links(html: str) -> dict[str, list[str]]:
+    title_to_links: dict[str, list[str]] = {}
 
-        if not href or not title or not context:
+    for m in re.finditer(
+        r'<a[^>]+href="(?P<link>https://careers\.unido\.org/job/[^"]+|/job/[^"]+)"[^>]*>(?P<title>.*?)</a>',
+        html,
+        re.I | re.S,
+    ):
+        href = (m.group("link") or "").strip()
+        title = re.sub(r"<[^>]+>", " ", m.group("title") or "")
+        title = normalize_space(title)
+
+        if not href or not title:
             continue
 
         link = href if href.startswith("http") else f"https://careers.unido.org{href}"
+        title_to_links.setdefault(title, []).append(link)
 
-        duty = extract_duty(context)
+    return title_to_links
+
+
+def extract_jobs_from_text(body_text: str, title_to_links: dict[str, list[str]]) -> list[JobItem]:
+    jobs: list[JobItem] = []
+    seen_links = set()
+
+    text = body_text.replace("\r", "")
+    all_titles = [t for t in title_to_links.keys() if t]
+
+    # Find every occurrence of every title in the rendered body text
+    occurrences: list[tuple[int, str]] = []
+    for title in all_titles:
+        for m in re.finditer(re.escape(title), text):
+            occurrences.append((m.start(), title))
+
+    occurrences.sort(key=lambda x: x[0])
+
+    for idx, (start, title) in enumerate(occurrences):
+        end = occurrences[idx + 1][0] if idx + 1 < len(occurrences) else min(len(text), start + 800)
+        snippet = normalize_space(text[start:end])
+
+        if "vienna, austria" not in snippet.lower():
+            continue
+
+        duty = extract_duty(snippet)
         if duty.lower() != UNIDO_LOCATION_FILTER:
             continue
 
-        grade = extract_grade(context)
-        category = extract_category(context)
-        duration = extract_duration(context)
-        deadline = extract_application_deadline(context)
+        grade = extract_grade(snippet)
+        duration = extract_duration(snippet)
+        deadline = extract_application_deadline(snippet)
 
+        link_queue = title_to_links.get(title, [])
+        if not link_queue:
+            continue
+
+        link = link_queue.pop(0)
         if link in seen_links:
             continue
         seen_links.add(link)
@@ -219,7 +189,6 @@ def fetch_jobs() -> list[JobItem]:
                 link=link,
                 location=duty,
                 level=grade,
-                category=category,
                 duration=duration,
                 closing_date=deadline,
                 raw_date=deadline,
@@ -227,6 +196,24 @@ def fetch_jobs() -> list[JobItem]:
         )
 
     return jobs
+
+
+def fetch_jobs() -> list[JobItem]:
+    html, body_text = fetch_rendered_page()
+    title_to_links = build_title_to_links(html)
+
+    jobs = extract_jobs_from_text(body_text, title_to_links)
+
+    # Final dedupe by link while preserving order
+    deduped: list[JobItem] = []
+    seen = set()
+    for job in jobs:
+        if job.link in seen:
+            continue
+        seen.add(job.link)
+        deduped.append(job)
+
+    return deduped
 
 
 def main() -> int:
