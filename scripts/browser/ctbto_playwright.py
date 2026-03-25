@@ -1,12 +1,19 @@
 import json
 import os
 import re
+import sys
 import time
 import urllib.parse
 import urllib.request
 import urllib.error
 
 from pathlib import Path
+
+CURRENT_FILE = Path(__file__).resolve()
+REPO_ROOT = CURRENT_FILE.parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from playwright.sync_api import sync_playwright
 
 from scripts.common.helpers import log, strip_html, normalize_space, format_dot_date
