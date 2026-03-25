@@ -18,7 +18,9 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install dependencies
-        run: pip install feedparser
+        run: |
+          pip install feedparser playwright
+          python -m playwright install chromium
       - name: Run checker
         env:
           SOURCE_ADAPTER: iaea
