@@ -1068,13 +1068,16 @@ def main() -> int:
     new_ids = []
 
     for job in new_jobs[:MAX_ALERTS_PER_RUN]:
-        try:
-            telegram_send(adapter.build_message(job))
-            alerts_sent += 1
+    try:
+        telegram_send(adapter.build_message(job))
+        alerts_sent += 1
+
+        if not DRY_RUN:
             new_ids.append(job.id)
-            time.sleep(1)
-        except Exception as e:
-            log(f"Failed to send Telegram message: {e}")
+
+        time.sleep(1)
+    except Exception as e:
+        log(f"Failed to send Telegram message: {e}")
 
     merged = list(dict.fromkeys(new_ids + state.get("seen_ids", [])))[:1000]
     save_state({"seen_ids": merged})
