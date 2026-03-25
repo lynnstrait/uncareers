@@ -39,66 +39,67 @@ DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() == "true"
 BOOTSTRAP_MODE = os.environ.get("BOOTSTRAP_MODE", "false").strip().lower() == "true"
 
 
-CATEGORY_CANDIDATES = [
-    "International Professionals",
-    "General Service",
-    "Consultancy opportunities",
-    "Internship Programme",
-    "Project Appointments",
-    "Junior Professional Officer Programme(JPO)",
-    "Junior Professional Officer Programme",
-    "National Professional officers",
-    "Local Support Personnel",
-]
-
-
-def extract_grade(text: str) -> str:
-    m = re.search(
-        r"\b(ISA\s*-\s*[A-Z0-9]+|ISA-[A-Z0-9]+|[PDGNLFS]\d|D1|D2|Intern|L2|P5|G4|G5)\b",
-        text,
-        re.I,
-    )
-    if not m:
-        return ""
-    return normalize_space(m.group(1)).replace("ISA -", "ISA-").replace("ISA - ", "ISA-")
-
-
-def extract_duty(text: str) -> str:
-    m = re.search(r"\b([A-Za-z .'\-]+,\s*[A-Za-z .'\-]+)\b", text)
-    return normalize_space(m.group(1)) if m else ""
-
-
-def extract_duration(text: str) -> str:
-    patterns = [
-        r"Duration[:\s]+([^\n|]+)",
-        r"Contract Duration[:\s]+([^\n|]+)",
-    ]
+def first_match(text: str, patterns: list[str]) -> str:
     for p in patterns:
-        m = re.search(p, text, re.I)
+        m = re.search(p, text, re.I | re.S)
         if m:
             return normalize_space(m.group(1))
     return ""
 
 
+def extract_grade(text: str) -> str:
+    value = first_match(text, [
+        r"Grade[:\s]+([^\n]+)",
+        r"Grade Level[:\s]+([^\n]+)",
+        r"\b(ISA\s*-\s*[A-Z0-9]+|ISA-[A-Z0-9]+|[PDGNLFS]\d|D1|D2|Intern|L2|P5|G4|G5)\b",
+    ])
+    return value.replace("ISA -", "ISA-").replace("ISA - ", "ISA-")
+
+
+def extract_duty_station(text: str) -> str:
+    value = first_match(text, [
+        r"Duty Station[:\s]+([^\n]+)",
+        r"Location[:\s]+([^\n]+)",
+    ])
+    if value:
+        return value
+
+    m = re.search(r"\b([A-Za-z .'\-]+,\s*[A-Za-z .'\-]+)\b", text)
+    return normalize_space(m.group(1)) if m else ""
+
+
+def extract_duration(text: str) -> str:
+    return first_match(text, [
+        r"Duration[:\s]+([^\n]+)",
+        r"Contract Duration[:\s]+([^\n]+)",
+        r"Duration of Appointment[:\s]+([^\n]+)",
+    ])
+
+
 def extract_application_deadline(text: str) -> str:
-    m = re.search(r"\b(\d{1,2}-[A-Za-z]{3}-\d{4})\b", text)
+    # Prefer labeled field first
+    value = first_match(text, [
+        r"Application Deadline[:\s]+([^\n]+)",
+        r"Deadline[:\s]+([^\n]+)",
+    ])
+    if value:
+        m = re.search(r"(\d{1,2}-[A-Za-z]{3}-\d{4}|\d{4}-\d{2}-\d{2})", value)
+        if m:
+            return m.group(1)
+
+    m = re.search(r"\b(\d{1,2}-[A-Za-z]{3}-\d{4}|\d{4}-\d{2}-\d{2})\b", text)
     return m.group(1) if m else ""
 
 
 def build_message(job: JobItem) -> str:
-    level = job.level or "-"
-    duty = job.location or "-"
-    duration = job.duration or "-"
-    closing = format_dot_date(job.closing_date) if job.closing_date else "-"
-
     parts = [
         f"<b>{escape_html(SOURCE_LABEL)}</b>",
         "",
         f"<b>{escape_html(job.title)}</b>",
-        f"Level: {escape_html(level)}",
-        f"Duty: {escape_html(duty)}",
-        f"Duration: {escape_html(duration)}",
-        f"Closing: {escape_html(closing)}",
+        f"Level: {escape_html(job.level or '-')}",
+        f"Duty: {escape_html(job.location or '-')}",
+        f"Duration: {escape_html(job.duration or '-')}",
+        f"Closing: {escape_html(format_dot_date(job.closing_date) if job.closing_date else '-')}",
     ]
 
     if job.link:
@@ -107,104 +108,108 @@ def build_message(job: JobItem) -> str:
     return "\n".join(parts)
 
 
-def fetch_rendered_page() -> tuple[str, str]:
+def fetch_listing_links() -> list[tuple[str, str]]:
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
         page.goto(SOURCE_URL, wait_until="networkidle", timeout=90000)
-        page.wait_for_timeout(6000)
+        page.wait_for_timeout(5000)
 
-        html = page.content()
-        body_text = page.locator("body").inner_text()
+        items = page.eval_on_selector_all(
+            'a[href*="/job/"]',
+            """
+            (anchors) => {
+              function norm(s) {
+                return (s || "").replace(/\\s+/g, " ").trim();
+              }
+              const out = [];
+              const seen = new Set();
+
+              for (const a of anchors) {
+                const href = norm(a.getAttribute("href") || "");
+                const title = norm(a.innerText || a.textContent || "");
+                if (!href || !title) continue;
+
+                const full = href.startsWith("http") ? href : ("https://careers.unido.org" + href);
+                const key = title + "||" + full;
+                if (seen.has(key)) continue;
+                seen.add(key);
+
+                out.push([title, full]);
+              }
+              return out;
+            }
+            """,
+        )
 
         browser.close()
-        return html, body_text
 
-
-def build_title_to_links(html: str) -> dict[str, list[str]]:
-    title_to_links: dict[str, list[str]] = {}
-
-    for m in re.finditer(
-        r'<a[^>]+href="(?P<link>https://careers\.unido\.org/job/[^"]+|/job/[^"]+)"[^>]*>(?P<title>.*?)</a>',
-        html,
-        re.I | re.S,
-    ):
-        href = (m.group("link") or "").strip()
-        title = re.sub(r"<[^>]+>", " ", m.group("title") or "")
-        title = normalize_space(title)
-
-        if not href or not title:
-            continue
-
-        link = href if href.startswith("http") else f"https://careers.unido.org{href}"
-        title_to_links.setdefault(title, []).append(link)
-
-    return title_to_links
-
-
-def extract_jobs_from_text(body_text: str, title_to_links: dict[str, list[str]]) -> list[JobItem]:
-    jobs: list[JobItem] = []
+    cleaned: list[tuple[str, str]] = []
     seen_links = set()
-
-    text = body_text.replace("\r", "")
-    all_titles = [t for t in title_to_links.keys() if t]
-
-    # Find every occurrence of every title in the rendered body text
-    occurrences: list[tuple[int, str]] = []
-    for title in all_titles:
-        for m in re.finditer(re.escape(title), text):
-            occurrences.append((m.start(), title))
-
-    occurrences.sort(key=lambda x: x[0])
-
-    for idx, (start, title) in enumerate(occurrences):
-        end = occurrences[idx + 1][0] if idx + 1 < len(occurrences) else min(len(text), start + 800)
-        snippet = normalize_space(text[start:end])
-
-        if "vienna, austria" not in snippet.lower():
+    for title, link in items:
+        title = normalize_space(title)
+        link = normalize_space(link)
+        if not title or not link:
             continue
-
-        duty = extract_duty(snippet)
-        if duty.lower() != UNIDO_LOCATION_FILTER:
-            continue
-
-        grade = extract_grade(snippet)
-        duration = extract_duration(snippet)
-        deadline = extract_application_deadline(snippet)
-
-        link_queue = title_to_links.get(title, [])
-        if not link_queue:
-            continue
-
-        link = link_queue.pop(0)
         if link in seen_links:
             continue
         seen_links.add(link)
+        cleaned.append((title, link))
+    return cleaned
 
-        jobs.append(
-            JobItem(
-                id=link,
-                source=SOURCE_LABEL,
-                title=title,
-                link=link,
-                location=duty,
-                level=grade,
-                duration=duration,
-                closing_date=deadline,
-                raw_date=deadline,
-            )
-        )
 
-    return jobs
+def fetch_detail_fields(browser, title: str, link: str) -> JobItem | None:
+    page = browser.new_page()
+    try:
+        page.goto(link, wait_until="domcontentloaded", timeout=90000)
+        page.wait_for_timeout(3000)
+        text = page.locator("body").inner_text()
+    finally:
+        page.close()
+
+    text = normalize_space(text)
+
+    duty = extract_duty_station(text)
+    if duty.lower() != UNIDO_LOCATION_FILTER:
+        return None
+
+    grade = extract_grade(text)
+    duration = extract_duration(text)
+    deadline = extract_application_deadline(text)
+
+    return JobItem(
+        id=link,
+        source=SOURCE_LABEL,
+        title=title,
+        link=link,
+        location=duty,
+        level=grade,
+        duration=duration,
+        closing_date=deadline,
+        raw_date=deadline,
+    )
 
 
 def fetch_jobs() -> list[JobItem]:
-    html, body_text = fetch_rendered_page()
-    title_to_links = build_title_to_links(html)
+    listing_items = fetch_listing_links()
+    log(f"UNIDO listing links: {len(listing_items)}")
 
-    jobs = extract_jobs_from_text(body_text, title_to_links)
+    jobs: list[JobItem] = []
 
-    # Final dedupe by link while preserving order
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+
+        for title, link in listing_items:
+            try:
+                job = fetch_detail_fields(browser, title, link)
+                if job:
+                    jobs.append(job)
+            except Exception as e:
+                log(f"Failed UNIDO detail parse: {title} | {e}")
+
+        browser.close()
+
+    # final dedupe by link
     deduped: list[JobItem] = []
     seen = set()
     for job in jobs:
