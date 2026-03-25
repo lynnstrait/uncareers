@@ -9,7 +9,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from playwright.sync_api import sync_playwright
-from bs4 import BeautifulSoup
 
 from scripts.common.helpers import (
     log,
@@ -40,16 +39,35 @@ DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() == "true"
 BOOTSTRAP_MODE = os.environ.get("BOOTSTRAP_MODE", "false").strip().lower() == "true"
 
 
-def extract_first(pattern: str, text: str) -> str:
-    m = re.search(pattern, text, re.I)
-    return normalize_space(m.group(1)) if m else ""
+CATEGORY_CANDIDATES = [
+    "International Professionals",
+    "General Service",
+    "Consultancy opportunities",
+    "Internship Programme",
+    "Project Appointments",
+    "Junior Professional Officer Programme(JPO)",
+    "Junior Professional Officer Programme",
+    "National Professional officers",
+    "Local Support Personnel",
+]
+
+
+def extract_category(text: str) -> str:
+    for c in CATEGORY_CANDIDATES:
+        if c.lower() in text.lower():
+            return c
+    return ""
 
 
 def extract_grade(text: str) -> str:
-    return extract_first(
+    m = re.search(
         r"\b(ISA\s*-\s*[A-Z0-9]+|ISA-[A-Z0-9]+|[PDGNLFS]\d|D1|D2|Intern|L2|P5|G4|G5)\b",
         text,
-    ).replace("ISA -", "ISA-").replace("ISA - ", "ISA-")
+        re.I,
+    )
+    if not m:
+        return ""
+    return normalize_space(m.group(1)).replace("ISA -", "ISA-").replace("ISA - ", "ISA-")
 
 
 def extract_duty(text: str) -> str:
@@ -58,7 +76,6 @@ def extract_duty(text: str) -> str:
 
 
 def extract_duration(text: str) -> str:
-    # Handle common UNIDO variants
     patterns = [
         r"Duration[:\s]+([^\n|]+)",
         r"Contract Duration[:\s]+([^\n|]+)",
@@ -71,7 +88,6 @@ def extract_duration(text: str) -> str:
 
 
 def extract_application_deadline(text: str) -> str:
-    # Usually visible as dd-Mon-yyyy
     m = re.search(r"\b(\d{1,2}-[A-Za-z]{3}-\d{4})\b", text)
     return m.group(1) if m else ""
 
@@ -97,68 +113,127 @@ def build_message(job: JobItem) -> str:
     return "\n".join(parts)
 
 
-def fetch_jobs() -> list[JobItem]:
-    jobs: list[JobItem] = []
-    seen = set()
-
+def fetch_rendered_page() -> tuple[str, str]:
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
-        page.goto(SOURCE_URL, wait_until="networkidle", timeout=60000)
-        page.wait_for_timeout(3000)
+        page.goto(SOURCE_URL, wait_until="networkidle", timeout=90000)
+        page.wait_for_timeout(5000)
         html = page.content()
+        text = page.locator("body").inner_text()
         browser.close()
+        return html, text
 
-    soup = BeautifulSoup(html, "html.parser")
-    anchors = soup.find_all("a", href=True)
 
-    for a in anchors:
-        href = (a.get("href") or "").strip()
-        if "/job/" not in href and "careers.unido.org/job/" not in href:
-            continue
+def build_title_to_links(html: str) -> dict[str, list[str]]:
+    title_to_links: dict[str, list[str]] = {}
 
-        title = normalize_space(a.get_text(" ", strip=True))
-        if not title:
+    for m in re.finditer(
+        r'<a[^>]+href="(?P<link>https://careers\.unido\.org/job/[^"]+|/job/[^"]+)"[^>]*>(?P<title>.*?)</a>',
+        html,
+        re.I | re.S,
+    ):
+        href = (m.group("link") or "").strip()
+        title = re.sub(r"<[^>]+>", " ", m.group("title") or "")
+        title = normalize_space(title)
+
+        if not title or not href:
             continue
 
         link = href if href.startswith("http") else f"https://careers.unido.org{href}"
+        title_to_links.setdefault(title, []).append(link)
 
-        container_text = ""
-        parent = a.parent
-        if parent:
-            container_text += " " + normalize_space(parent.get_text(" ", strip=True))
-            gp = getattr(parent, "parent", None)
-            if gp:
-                container_text += " " + normalize_space(gp.get_text(" ", strip=True))
+    return title_to_links
 
-        container_text = normalize_space(container_text)
 
-        duty = extract_duty(container_text)
+def parse_jobs_from_page_text(page_text: str, title_to_links: dict[str, list[str]]) -> list[JobItem]:
+    lines = [normalize_space(x) for x in page_text.split("\n")]
+    lines = [x for x in lines if x]
+
+    jobs: list[JobItem] = []
+    seen_links = set()
+
+    i = 0
+    while i + 2 < len(lines):
+        title_line = lines[i]
+        summary_line = lines[i + 1]
+        metadata_line = lines[i + 2]
+
+        # skip obvious noise/header rows
+        if title_line.lower() in {
+            "title",
+            "location",
+            "category",
+            "grade",
+            "application deadline",
+            "title location category grade application deadline",
+            "reset",
+            "search results",
+        }:
+            i += 1
+            continue
+
+        # expected 3-line pattern:
+        # title
+        # title + Vienna, Austria + grade
+        # Vienna, Austria + category + grade + deadline
+        if title_line not in summary_line:
+            i += 1
+            continue
+
+        if "vienna, austria" not in metadata_line.lower():
+            i += 1
+            continue
+
+        duty = "Vienna, Austria"
+        grade = extract_grade(metadata_line or summary_line)
+        category = extract_category(metadata_line)
+        duration = extract_duration(metadata_line) or extract_duration(summary_line)
+        deadline = extract_application_deadline(metadata_line)
+
         if duty.lower() != UNIDO_LOCATION_FILTER:
+            i += 1
             continue
 
-        grade = extract_grade(container_text)
-        duration = extract_duration(container_text)
-        deadline = extract_application_deadline(container_text)
-
-        if link in seen:
+        if not deadline:
+            i += 1
             continue
-        seen.add(link)
+
+        link_queue = title_to_links.get(title_line, [])
+        if not link_queue:
+            i += 1
+            continue
+
+        link = link_queue.pop(0)
+        if link in seen_links:
+            i += 1
+            continue
+        seen_links.add(link)
 
         jobs.append(
             JobItem(
                 id=link,
                 source=SOURCE_LABEL,
-                title=title,
+                title=title_line,
                 link=link,
                 location=duty,
                 level=grade,
+                category=category,
                 duration=duration,
                 closing_date=deadline,
                 raw_date=deadline,
             )
         )
 
+        i += 3
+
+    return jobs
+
+
+def fetch_jobs() -> list[JobItem]:
+    html, page_text = fetch_rendered_page()
+    title_to_links = build_title_to_links(html)
+    jobs = parse_jobs_from_page_text(page_text, title_to_links)
     return jobs
 
 
