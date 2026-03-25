@@ -35,7 +35,7 @@ jobs:
           STATE_FILE: data/seen_unido.json
           MAX_ALERTS_PER_RUN: 10
           DRY_RUN: "false"
-          BOOTSTRAP_MODE: "true"
+          BOOTSTRAP_MODE: "false"
         run: python scripts/check_jobs.py
 
       - name: Commit state
