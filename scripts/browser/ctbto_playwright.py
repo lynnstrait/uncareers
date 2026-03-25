@@ -68,15 +68,18 @@ def fetch_rendered_html(url: str) -> str:
         return html
 
 
-def fetch_detail_text(url: str) -> str:
+def fetch_detail_payload(url: str) -> tuple[str, str]:
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
         page.goto(url, wait_until="domcontentloaded", timeout=90000)
         page.wait_for_timeout(5000)
-        text = page.locator("body").inner_text()
+
+        body_text = page.locator("body").inner_text()
+        page_title = page.title()
+
         browser.close()
-        return text
+        return body_text, normalize_space(page_title)
 
 
 def first_match(text: str, patterns: list[str]) -> str:
@@ -94,6 +97,8 @@ def clean_title(title: str, req_id: str) -> str:
 
     title = re.sub(r"^(job title|title)\s*[:\-]?\s*", "", title, flags=re.I).strip()
     title = re.sub(r"\s+", " ", title).strip()
+    title = re.sub(r"\s*-\s*CTBTO.*$", "", title, flags=re.I).strip()
+    title = re.sub(r"\s*\|\s*CTBTO.*$", "", title, flags=re.I).strip()
 
     if title.lower() in {"ctbto vacancy", "vacancy", "job title", "title"}:
         return f"CTBTO Vacancy {req_id}"
@@ -106,17 +111,13 @@ def clean_section(value: str) -> str:
     if not value:
         return ""
 
-    # prefer explicit Section capture if present
     m = re.search(r"([A-Za-z0-9&,\-()/' ]+Section)", value, re.I)
     if m:
         return normalize_space(m.group(1))
 
-    # strip leading Division/Office/Unit labels if mixed in one line
     value = re.sub(r"\bDivision[:\s].*?(?=Section[:\s]|$)", "", value, flags=re.I).strip()
     value = re.sub(r"\bOffice[:\s].*?(?=Section[:\s]|$)", "", value, flags=re.I).strip()
     value = re.sub(r"\bUnit[:\s].*$", "", value, flags=re.I).strip()
-
-    # remove explicit Section label text
     value = re.sub(r"^Section[:\s]*", "", value, flags=re.I).strip()
 
     return normalize_space(value)
@@ -127,7 +128,6 @@ def clean_closing(value: str) -> str:
     if not value:
         return ""
 
-    # keep only the date part, drop "Vacancy Reference..." etc.
     m = re.search(
         r"([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4}|\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}|\d{4}-\d{2}-\d{2})",
         value,
@@ -170,7 +170,7 @@ def fetch_ctbto_jobs() -> list[dict]:
             continue
         seen_links.add(link)
 
-        text = fetch_detail_text(link)
+        text, page_title = fetch_detail_payload(link)
         lowered = text.lower()
 
         if "this job cannot be viewed at the moment" in lowered:
@@ -182,7 +182,13 @@ def fetch_ctbto_jobs() -> list[dict]:
             r"Job Title[:\s]+(.+?)(?:\n|Grade Level|Grade|Division|Department|Section|Type of Appointment|Date of Issuance|Date of Issue|Deadline for Applications|Deadline)",
             r"Title[:\s]+(.+?)(?:\n|Grade Level|Grade|Division|Department|Section|Type of Appointment|Date of Issuance|Date of Issue|Deadline for Applications|Deadline)",
         ])
-     
+
+        if not normalize_space(title_raw):
+            cleaned_page_title = re.sub(r"\s*-\s*CTBTO.*$", "", page_title, flags=re.I).strip()
+            cleaned_page_title = re.sub(r"\s*\|\s*CTBTO.*$", "", cleaned_page_title, flags=re.I).strip()
+            if cleaned_page_title and "ctbto vacancy" not in cleaned_page_title.lower():
+                title_raw = cleaned_page_title
+
         title = clean_title(title_raw, req_id)
 
         level = first_match(text, [
@@ -190,7 +196,6 @@ def fetch_ctbto_jobs() -> list[dict]:
             r"Grade[:\s]+(.+?)(?:Division|Department|Section|Type of Appointment|Date of Issuance|Date of Issue|Deadline for Applications|Deadline)",
         ])
 
-        # We normalize everything into Sect:
         section_raw = first_match(text, [
             r"Section[:\s]+(.+?)(?:Unit|Type of Appointment|Date of Issuance|Date of Issue|Deadline for Applications|Deadline)",
             r"Division[:\s]+(.+?)(?:Section|Unit|Type of Appointment|Date of Issuance|Date of Issue|Deadline for Applications|Deadline)",
