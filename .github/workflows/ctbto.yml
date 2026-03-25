@@ -19,7 +19,7 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: |
-          pip install playwright beautifulsoup4
+          pip install playwright beautifulsoup4 feedparser
           python -m playwright install chromium
       - name: Run checker
         env:
