@@ -602,11 +602,23 @@ class UNIDOAdapter(SourceAdapter):
         value = value.replace("ISA -", "ISA-").replace("ISA - ", "ISA-")
         return value
 
-    def parse_jobs_from_text(self, page_text: str) -> list[JobItem]:
-        jobs = []
+    def fetch_jobs(self) -> list[JobItem]:
+        html_bytes = fetch(self.source_url)
+        text = html_bytes.decode("utf-8", errors="replace")
+        page_text = strip_html(text)
 
-        lines = [normalize_space(x) for x in page_text.split("\n")]
-        lines = [x for x in lines if x]
+        m = re.search(r"Results\s+\d+\s+[–-]\s+\d+\s+of\s+(\d+)", page_text, re.IGNORECASE)
+        if m:
+            log(f"UNIDO page reports total results: {m.group(1)}")
+
+        pattern = re.compile(
+            r'<a[^>]+href="(?P<link>https://careers\.unido\.org/job/[^"]+|/job/[^"]+)"[^>]*>(?P<title>.*?)</a>',
+            re.IGNORECASE | re.DOTALL,
+        )
+
+        matches = list(pattern.finditer(text))
+        jobs = []
+        seen = set()
 
         category_candidates = [
             "International Professionals",
@@ -620,73 +632,50 @@ class UNIDOAdapter(SourceAdapter):
             "Local Support Personnel",
         ]
 
-        seen = set()
-        i = 0
+        for idx, match in enumerate(matches):
+            raw_link = html.unescape(match.group("link")).strip()
+            link = urllib.parse.urljoin("https://careers.unido.org", raw_link)
+            link = self.normalize_link(link)
 
-        while i < len(lines):
-            line = lines[i]
+            title = strip_html(match.group("title"))
+            title = normalize_space(title)
 
-            deadline_match = re.search(r"\b(\d{1,2}-[A-Za-z]{3}-\d{4})\b", line)
-            location_match = re.search(r"\bVienna,\s*Austria\b", line, re.IGNORECASE)
-
-            if not (deadline_match and location_match):
-                i += 1
+            if not title:
                 continue
 
-            closing_date = deadline_match.group(1)
-            location = "Vienna, Austria"
+            start = match.end()
+            end = matches[idx + 1].start() if idx + 1 < len(matches) else min(len(text), start + 1500)
+            block = strip_html(text[start:end])
+            block = normalize_space(block)
+
+            location_match = re.search(r"\b([A-Za-z .'\-]+,\s*[A-Za-z .'\-]+)\b", block)
+            location = normalize_space(location_match.group(1)) if location_match else ""
 
             category = ""
             for c in category_candidates:
-                if c.lower() in line.lower():
+                if c.lower() in block.lower():
                     category = c
                     break
 
             level = ""
             m_level = re.search(
-                r"\b(ISA\s*-\s*[A-Z0-9]+|ISA-[A-Z0-9]+|[A-Z]+\d|Intern)\b",
-                line,
+                r"\b(ISA\s*-\s*[A-Z0-9]+|ISA-[A-Z0-9]+|[PDGNLFS]\d|D1|D2|Intern)\b",
+                block,
                 re.IGNORECASE,
             )
             if m_level:
                 level = self.normalize_grade(m_level.group(1))
 
-            title = ""
-            j = i - 1
-            while j >= 0:
-                prev = lines[j].strip()
+            closing_date = ""
+            m_deadline = re.search(r"\b(\d{1,2}-[A-Za-z]{3}-\d{4})\b", block)
+            if m_deadline:
+                closing_date = m_deadline.group(1)
 
-                if prev.lower() in {
-                    "title",
-                    "location",
-                    "category",
-                    "grade",
-                    "application deadline",
-                    "title location category grade application deadline",
-                }:
-                    j -= 1
-                    continue
-
-                if "vienna, austria" in prev.lower():
-                    j -= 1
-                    continue
-
-                if re.fullmatch(r"(ISA\s*-\s*[A-Z0-9]+|ISA-[A-Z0-9]+|[A-Z]+\d|Intern)", prev, re.IGNORECASE):
-                    j -= 1
-                    continue
-
-                title = prev
-                break
-
-            title = normalize_space(title)
-
-            if not title:
-                i += 1
+            if location.lower() != UNIDO_LOCATION_FILTER:
                 continue
 
             key = (title.lower(), location.lower(), level.lower(), closing_date.lower())
             if key in seen:
-                i += 1
                 continue
             seen.add(key)
 
@@ -694,7 +683,7 @@ class UNIDOAdapter(SourceAdapter):
                 id=f"unido:{title}|{location}|{level}|{closing_date}",
                 source=self.source_name,
                 title=title,
-                link=self.source_url,
+                link=link,
                 location=location,
                 level=level,
                 category=category,
@@ -702,20 +691,6 @@ class UNIDOAdapter(SourceAdapter):
                 raw_date=closing_date,
             ))
 
-            i += 1
-
-        return jobs
-
-    def fetch_jobs(self) -> list[JobItem]:
-        html_bytes = fetch(self.source_url)
-        text = html_bytes.decode("utf-8", errors="replace")
-        page_text = strip_html(text)
-
-        m = re.search(r"Results\s+\d+\s+[–-]\s+\d+\s+of\s+(\d+)", page_text, re.IGNORECASE)
-        if m:
-            log(f"UNIDO page reports total results: {m.group(1)}")
-
-        jobs = self.parse_jobs_from_text(page_text)
         return jobs
 
     def build_message(self, job: JobItem) -> str:
