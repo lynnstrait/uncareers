@@ -29,7 +29,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           STATE_FILE: data/seen_unido.json
           MAX_ALERTS_PER_RUN: 10
-          DRY_RUN: "true"
+          DRY_RUN: "false"
           BOOTSTRAP_MODE: "false"
         run: python scripts/browser/unido_playwright.py
       - name: Commit state
