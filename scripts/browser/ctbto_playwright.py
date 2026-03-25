@@ -95,6 +95,7 @@ def clean_title(title: str, req_id: str) -> str:
     if not title:
         return f"CTBTO Vacancy {req_id}"
 
+    title = re.sub(r"^(career opportunities:\s*)", "", title, flags=re.I).strip()
     title = re.sub(r"^(job title|title)\s*[:\-]?\s*", "", title, flags=re.I).strip()
     title = re.sub(r"\s+", " ", title).strip()
     title = re.sub(r"\s*-\s*CTBTO.*$", "", title, flags=re.I).strip()
