@@ -28,7 +28,7 @@ jobs:
         env:
           SOURCE_ADAPTER: ctbto
           SOURCE_LABEL: CTBTO
-          SOURCE_URL: "https://www.ctbto.org/work-with-us/employment"
+          SOURCE_URL: "https://career2.successfactors.eu/career?company=ctbtoprepa&career%5fns=job%5flisting%5fsummary&navBarLevel=JOB%5fSEARCH&_s.crb=tUTAuCdBS3%2bSdwBfwXNGQb0YHJR7rorbgNstNMJ1u0o%3d"
           CTBTO_LOCATION_FILTER: ""
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
