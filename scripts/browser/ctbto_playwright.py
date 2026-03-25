@@ -220,7 +220,6 @@ def main() -> int:
                 bot_token=TELEGRAM_BOT_TOKEN,
                 chat_id=TELEGRAM_CHAT_ID,
                 message_html=message_html,
-                disable_web_page_preview=False,
                 dry_run=DRY_RUN,
             )
             alerts_sent += 1
