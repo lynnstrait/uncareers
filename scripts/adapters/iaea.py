@@ -136,7 +136,12 @@ class IAEAAdapter(RSSAdapter):
                 detail = self.fetch_detail_fields(browser, link)
 
                 level = level_from_title or detail.get("grade", "")
-                duration = detail.get("duration") or self.extract_duration_from_description(description)
+                duration_raw = detail.get("duration") or self.extract_duration_from_description(description)
+                duration = ""
+                if duration_raw:
+                    duration = normalize_space(duration_raw)
+                    if re.fullmatch(r"\d+", duration):
+                        duration = f"{duration} months"             
                 open_date = detail.get("open") or published
                 closing_date = detail.get("closing") or self.extract_closing_from_description(description)
 
