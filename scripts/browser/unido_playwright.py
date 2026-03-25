@@ -40,38 +40,38 @@ DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() == "true"
 BOOTSTRAP_MODE = os.environ.get("BOOTSTRAP_MODE", "false").strip().lower() == "true"
 
 
-CATEGORY_CANDIDATES = [
-    "International Professionals",
-    "General Service",
-    "Consultancy opportunities",
-    "Internship Programme",
-    "Project Appointments",
-    "Junior Professional Officer Programme(JPO)",
-    "Junior Professional Officer Programme",
-    "National Professional officers",
-    "Local Support Personnel",
-]
+def extract_first(pattern: str, text: str) -> str:
+    m = re.search(pattern, text, re.I)
+    return normalize_space(m.group(1)) if m else ""
 
 
-def extract_category(text: str) -> str:
-    for c in CATEGORY_CANDIDATES:
-        if c.lower() in text.lower():
-            return c
+def extract_grade(text: str) -> str:
+    return extract_first(
+        r"\b(ISA\s*-\s*[A-Z0-9]+|ISA-[A-Z0-9]+|[PDGNLFS]\d|D1|D2|Intern|L2|P5|G4|G5)\b",
+        text,
+    ).replace("ISA -", "ISA-").replace("ISA - ", "ISA-")
+
+
+def extract_duty(text: str) -> str:
+    m = re.search(r"\b([A-Za-z .'\-]+,\s*[A-Za-z .'\-]+)\b", text)
+    return normalize_space(m.group(1)) if m else ""
+
+
+def extract_duration(text: str) -> str:
+    # Handle common UNIDO variants
+    patterns = [
+        r"Duration[:\s]+([^\n|]+)",
+        r"Contract Duration[:\s]+([^\n|]+)",
+    ]
+    for p in patterns:
+        m = re.search(p, text, re.I)
+        if m:
+            return normalize_space(m.group(1))
     return ""
 
 
-def extract_level(text: str) -> str:
-    m = re.search(
-        r"\b(ISA\s*-\s*[A-Z0-9]+|ISA-[A-Z0-9]+|[PDGNLFS]\d|D1|D2|Intern|L2|P5|G4|G5)\b",
-        text,
-        re.I,
-    )
-    if not m:
-        return ""
-    return normalize_space(m.group(1)).replace("ISA -", "ISA-").replace("ISA - ", "ISA-")
-
-
-def extract_deadline(text: str) -> str:
+def extract_application_deadline(text: str) -> str:
+    # Usually visible as dd-Mon-yyyy
     m = re.search(r"\b(\d{1,2}-[A-Za-z]{3}-\d{4})\b", text)
     return m.group(1) if m else ""
 
@@ -82,16 +82,18 @@ def build_message(job: JobItem) -> str:
         "",
         f"<b>{escape_html(job.title)}</b>",
     ]
-    if job.location:
-        parts.append(f"Location: {escape_html(job.location)}")
+
     if job.level:
         parts.append(f"Level: {escape_html(job.level)}")
-    if job.category:
-        parts.append(f"Dept: {escape_html(job.category)}")
+    if job.location:
+        parts.append(f"Duty: {escape_html(job.location)}")
+    if job.duration:
+        parts.append(f"Duration: {escape_html(job.duration)}")
     if job.closing_date:
         parts.append(f"Closing: {escape_html(format_dot_date(job.closing_date))}")
     if job.link:
         parts.append(f'<a href="{escape_html(job.link)}">Job Open</a>')
+
     return "\n".join(parts)
 
 
@@ -128,15 +130,16 @@ def fetch_jobs() -> list[JobItem]:
             gp = getattr(parent, "parent", None)
             if gp:
                 container_text += " " + normalize_space(gp.get_text(" ", strip=True))
+
         container_text = normalize_space(container_text)
 
-        location = "Vienna, Austria" if "vienna, austria" in container_text.lower() else ""
-        if location.lower() != UNIDO_LOCATION_FILTER:
+        duty = extract_duty(container_text)
+        if duty.lower() != UNIDO_LOCATION_FILTER:
             continue
 
-        category = extract_category(container_text)
-        level = extract_level(container_text)
-        deadline = extract_deadline(container_text)
+        grade = extract_grade(container_text)
+        duration = extract_duration(container_text)
+        deadline = extract_application_deadline(container_text)
 
         if link in seen:
             continue
@@ -148,9 +151,9 @@ def fetch_jobs() -> list[JobItem]:
                 source=SOURCE_LABEL,
                 title=title,
                 link=link,
-                location=location,
-                level=level,
-                category=category,
+                location=duty,
+                level=grade,
+                duration=duration,
                 closing_date=deadline,
                 raw_date=deadline,
             )
