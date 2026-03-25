@@ -1,9 +1,9 @@
 import re
 
+from playwright.sync_api import sync_playwright
+
 from scripts.adapters.base import RSSAdapter
 from scripts.common.helpers import (
-    fetch,
-    strip_html,
     normalize_space,
     format_dot_date,
     escape_html,
@@ -29,7 +29,11 @@ class IAEAAdapter(RSSAdapter):
 
     def clean_taleo_title(self, title: str) -> tuple[str, str]:
         title = title.strip()
-        m = re.search(r"\((P\d+|G\d+|NO?[A-Z]?\d+|FS\d+)\)\s*(MULT)?\s*$", title, re.IGNORECASE)
+        m = re.search(
+            r"\((P\d+|G\d+|NO?[A-Z]?\d+|FS\d+)\)\s*(MULT)?\s*$",
+            title,
+            re.IGNORECASE,
+        )
         if m:
             level = m.group(1).upper()
             title = title[:m.start()].strip()
@@ -60,25 +64,13 @@ class IAEAAdapter(RSSAdapter):
                 return normalize_space(m.group(1))
         return ""
 
-    def extract_competitive(self, description: str) -> str:
-        patterns = [
-            r"Full Competitive Recruitment[:\s]+([^\n]+)",
-            r"Competitive[:\s]+([^\n]+)",
-        ]
-        for p in patterns:
-            m = re.search(p, description, re.IGNORECASE)
-            if m:
-                return normalize_space(m.group(1))
-        return ""
-
     def extract_page_field(self, page_text: str, field_name: str) -> str:
         lines = [normalize_space(x) for x in page_text.split("\n")]
         lines = [x for x in lines if x]
 
         for i, line in enumerate(lines):
-            # Case 1: label on its own line, value on one of the next few lines
             if line.lower() == field_name.lower():
-                for j in range(i + 1, min(i + 5, len(lines))):
+                for j in range(i + 1, min(i + 6, len(lines))):
                     candidate = lines[j].strip()
                     if not candidate or candidate == ":":
                         continue
@@ -86,114 +78,86 @@ class IAEAAdapter(RSSAdapter):
                         break
                     return candidate
 
-            # Case 2: "Field Name: value" on one line
             m = re.match(rf"^{re.escape(field_name)}\s*:\s*(.*)$", line, re.IGNORECASE)
             if m:
                 value = m.group(1).strip()
-                if not value or value == ":":
-                    # look ahead a few lines
-                    for j in range(i + 1, min(i + 5, len(lines))):
-                        candidate = lines[j].strip()
-                        if not candidate or candidate == ":":
-                            continue
-                        if candidate.lower() in self.KNOWN_LABELS:
-                            break
-                        return candidate
-                    return ""
-                if value.lower() in self.KNOWN_LABELS:
-                    return ""
-                return value
+                if value and value != ":" and value.lower() not in self.KNOWN_LABELS:
+                    return value
+
+                for j in range(i + 1, min(i + 6, len(lines))):
+                    candidate = lines[j].strip()
+                    if not candidate or candidate == ":":
+                        continue
+                    if candidate.lower() in self.KNOWN_LABELS:
+                        break
+                    return candidate
 
         return ""
 
-    def extract_date_after_label(self, page_text: str, field_name: str) -> str:
-        """
-        More robust fallback for TAL pages where the label/value layout is odd.
-        Searches the text region immediately after the field label and extracts
-        the first date-looking token.
-        """
-        patterns = [
-            rf"{re.escape(field_name)}[\s:]*([A-Za-z]{{3,9}}\s+\d{{1,2}},\s+\d{{4}})",
-            rf"{re.escape(field_name)}[\s:]*([A-Za-z]{{3,9}}\s+\d{{1,2}}\s+\d{{4}})",
-            rf"{re.escape(field_name)}[\s:]*([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}})",
-        ]
-        for p in patterns:
-            m = re.search(p, page_text, re.IGNORECASE)
-            if m:
-                return normalize_space(m.group(1))
+    def fetch_detail_text(self, browser, link: str) -> str:
+        page = browser.new_page()
+        try:
+            page.goto(link, wait_until="domcontentloaded", timeout=90000)
+            page.wait_for_timeout(2500)
+            return page.locator("body").inner_text()
+        finally:
+            page.close()
 
-        idx = page_text.lower().find(field_name.lower())
-        if idx >= 0:
-            snippet = page_text[idx: idx + 200]
-            m = re.search(
-                r"([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4}|[A-Za-z]{3,9}\s+\d{1,2}\s+\d{4}|\d{4}-\d{2}-\d{2})",
-                snippet,
-                re.IGNORECASE,
-            )
-            if m:
-                return normalize_space(m.group(1))
-
-        return ""
-
-    def fetch_detail_fields(self, link: str) -> dict:
+    def fetch_detail_fields(self, browser, link: str) -> dict:
         if not link:
             return {}
 
         try:
-            html_bytes = fetch(link, timeout=30)
-            page_text = strip_html(html_bytes.decode("utf-8", errors="replace"))
+            page_text = self.fetch_detail_text(browser, link)
         except Exception:
             return {}
 
-        open_value = self.extract_page_field(page_text, "Job Posting")
-        closing_value = self.extract_page_field(page_text, "Closing Date")
-
-        if not open_value or open_value == ":":
-            open_value = self.extract_date_after_label(page_text, "Job Posting")
-
-        if not closing_value or closing_value == ":":
-            closing_value = self.extract_date_after_label(page_text, "Closing Date")
-
         return {
-            "open": open_value,
-            "closing": closing_value,
+            "open": self.extract_page_field(page_text, "Job Posting"),
+            "closing": self.extract_page_field(page_text, "Closing Date"),
             "duration": self.extract_page_field(page_text, "Duration in Months"),
-            "competitive": self.extract_page_field(page_text, "Full Competitive Recruitment"),
+            "grade": self.extract_page_field(page_text, "Grade"),
         }
 
     def fetch_jobs(self) -> list[JobItem]:
         items = self.fetch_rss_items()
         jobs = []
 
-        for item in items:
-            title_raw = (item.get("title") or "").strip()
-            description = (item.get("description") or "").strip()
-            published = (item.get("published") or "").strip()
-            link = (item.get("link") or "").strip()
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
 
-            title, level_from_title = self.clean_taleo_title(title_raw)
-            detail = self.fetch_detail_fields(link)
+            for item in items:
+                title_raw = (item.get("title") or "").strip()
+                description = (item.get("description") or "").strip()
+                published = (item.get("published") or "").strip()
+                link = (item.get("link") or "").strip()
 
-            duration = detail.get("duration") or self.extract_duration_from_description(description)
-            open_date = detail.get("open") or published
-            closing_date = detail.get("closing") or self.extract_closing_from_description(description)
+                title, level_from_title = self.clean_taleo_title(title_raw)
+                detail = self.fetch_detail_fields(browser, link)
 
-            job_id = item.get("guid") or link or title_raw
-            jobs.append(
-                JobItem(
-                    id=job_id,
-                    source=self.source_name,
-                    title=title,
-                    link=link,
-                    description=description,
-                    published=published,
-                    level=level_from_title,
-                    duration=duration,
-                    open_date=open_date,
-                    closing_date=closing_date,
-                    raw_date=closing_date or open_date or published,
+                level = level_from_title or detail.get("grade", "")
+                duration = detail.get("duration") or self.extract_duration_from_description(description)
+                open_date = detail.get("open") or published
+                closing_date = detail.get("closing") or self.extract_closing_from_description(description)
+
+                job_id = item.get("guid") or link or title_raw
+                jobs.append(
+                    JobItem(
+                        id=job_id,
+                        source=self.source_name,
+                        title=title,
+                        link=link,
+                        description=description,
+                        published=published,
+                        level=level,
+                        duration=duration,
+                        open_date=open_date,
+                        closing_date=closing_date,
+                        raw_date=closing_date or open_date or published,
+                    )
                 )
-            )
+
+            browser.close()
 
         return jobs
 
