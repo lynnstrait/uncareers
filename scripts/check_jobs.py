@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from bs4 import BeautifulSoup
 
 import feedparser
 
@@ -604,93 +605,126 @@ class IAEAAdapter(RSSAdapter):
 class UNIDOAdapter(SourceAdapter):
     source_name = "UNIDO"
 
+    CATEGORY_CANDIDATES = [
+        "International Professionals",
+        "General Service",
+        "Consultancy opportunities",
+        "Internship Programme",
+        "Project Appointments",
+        "Junior Professional Officer Programme(JPO)",
+        "Junior Professional Officer Programme",
+        "National Professional officers",
+        "Local Support Personnel",
+    ]
+
     def normalize_link(self, link: str) -> str:
-        return clean_link((link or "").split("?", 1)[0].strip())
+        link = html.unescape(link or "").strip()
+        if not link:
+            return ""
+        link = urllib.parse.urljoin("https://careers.unido.org", link)
+        return clean_link(link.split("?", 1)[0].strip())
 
     def normalize_grade(self, value: str) -> str:
         value = normalize_space(value)
         value = value.replace("ISA -", "ISA-").replace("ISA - ", "ISA-")
         return value
 
+    def _extract_category(self, text: str) -> str:
+        for c in self.CATEGORY_CANDIDATES:
+            if c.lower() in text.lower():
+                return c
+        return ""
+
+    def _extract_level(self, text: str) -> str:
+        m = re.search(
+            r"\b(ISA\s*-\s*[A-Z0-9]+|ISA-[A-Z0-9]+|[PDGNLFS]\d|D1|D2|Intern|L2|P5|G4|G5)\b",
+            text,
+            re.IGNORECASE,
+        )
+        return self.normalize_grade(m.group(1)) if m else ""
+
+    def _extract_deadline(self, text: str) -> str:
+        m = re.search(r"\b(\d{1,2}-[A-Za-z]{3}-\d{4})\b", text)
+        return m.group(1) if m else ""
+
+    def _extract_location(self, text: str) -> str:
+        m = re.search(r"\b([A-Za-z .'\-]+,\s*[A-Za-z .'\-]+)\b", text)
+        return normalize_space(m.group(1)) if m else ""
+
+    def _get_nearby_text(self, anchor) -> str:
+        """
+        Gather text from the anchor's nearest meaningful container.
+        This avoids brittle fixed-character slicing.
+        """
+        candidates = []
+
+        # direct parent
+        if anchor.parent:
+            candidates.append(anchor.parent.get_text(" ", strip=True))
+
+        # grandparent
+        if getattr(anchor.parent, "parent", None):
+            candidates.append(anchor.parent.parent.get_text(" ", strip=True))
+
+        # next few siblings
+        sib = anchor.parent.next_sibling if anchor.parent else anchor.next_sibling
+        steps = 0
+        while sib is not None and steps < 6:
+            if hasattr(sib, "get_text"):
+                txt = sib.get_text(" ", strip=True)
+            else:
+                txt = normalize_space(str(sib))
+            if txt:
+                candidates.append(txt)
+            sib = getattr(sib, "next_sibling", None)
+            steps += 1
+
+        merged = " | ".join([normalize_space(x) for x in candidates if normalize_space(x)])
+        return merged
+
     def fetch_jobs(self) -> list[JobItem]:
         html_bytes = fetch(self.source_url)
-        text = html_bytes.decode("utf-8", errors="replace")
-        page_text = strip_html(text)
+        html_text = html_bytes.decode("utf-8", errors="replace")
+        page_text = strip_html(html_text)
 
         m = re.search(r"Results\s+\d+\s+[–-]\s+\d+\s+of\s+(\d+)", page_text, re.IGNORECASE)
         if m:
             log(f"UNIDO page reports total results: {m.group(1)}")
 
-        pattern = re.compile(
-            r'<a[^>]+href="(?P<link>https://careers\.unido\.org/job/[^"]+|/job/[^"]+)"[^>]*>(?P<title>.*?)</a>',
-            re.IGNORECASE | re.DOTALL,
-        )
+        soup = BeautifulSoup(html_text, "html.parser")
 
-        matches = list(pattern.finditer(text))
-        jobs = []
-        seen = set()
+        anchors = soup.find_all("a", href=True)
+        jobs: list[JobItem] = []
+        seen_links: set[str] = set()
 
-        category_candidates = [
-            "International Professionals",
-            "General Service",
-            "Consultancy opportunities",
-            "Internship Programme",
-            "Project Appointments",
-            "Junior Professional Officer Programme(JPO)",
-            "Junior Professional Officer Programme",
-            "National Professional officers",
-            "Local Support Personnel",
-        ]
-
-        for idx, match in enumerate(matches):
-            raw_link = html.unescape(match.group("link")).strip()
-            link = urllib.parse.urljoin("https://careers.unido.org", raw_link)
-            link = self.normalize_link(link)
-
-            title = strip_html(match.group("title"))
-            title = normalize_space(title)
-
-            if not title:
+        for a in anchors:
+            href = a.get("href", "").strip()
+            if "/job/" not in href and "careers.unido.org/job/" not in href:
                 continue
 
-            start = match.end()
-            end = matches[idx + 1].start() if idx + 1 < len(matches) else min(len(text), start + 1500)
-            block = strip_html(text[start:end])
-            block = normalize_space(block)
+            title = normalize_space(a.get_text(" ", strip=True))
+            link = self.normalize_link(href)
 
-            location_match = re.search(r"\b([A-Za-z .'\-]+,\s*[A-Za-z .'\-]+)\b", block)
-            location = normalize_space(location_match.group(1)) if location_match else ""
+            if not title or not link:
+                continue
 
-            category = ""
-            for c in category_candidates:
-                if c.lower() in block.lower():
-                    category = c
-                    break
+            nearby_text = self._get_nearby_text(a)
 
-            level = ""
-            m_level = re.search(
-                r"\b(ISA\s*-\s*[A-Z0-9]+|ISA-[A-Z0-9]+|[PDGNLFS]\d|D1|D2|Intern)\b",
-                block,
-                re.IGNORECASE,
-            )
-            if m_level:
-                level = self.normalize_grade(m_level.group(1))
-
-            closing_date = ""
-            m_deadline = re.search(r"\b(\d{1,2}-[A-Za-z]{3}-\d{4})\b", block)
-            if m_deadline:
-                closing_date = m_deadline.group(1)
+            location = self._extract_location(nearby_text)
+            category = self._extract_category(nearby_text)
+            level = self._extract_level(nearby_text)
+            closing_date = self._extract_deadline(nearby_text)
 
             if location.lower() != UNIDO_LOCATION_FILTER:
                 continue
 
-            key = (title.lower(), location.lower(), level.lower(), closing_date.lower())
-            if key in seen:
+            # link-only dedupe
+            if link in seen_links:
                 continue
-            seen.add(key)
+            seen_links.add(link)
 
             jobs.append(JobItem(
-                id=f"unido:{title}|{location}|{level}|{closing_date}",
+                id=link,
                 source=self.source_name,
                 title=title,
                 link=link,
