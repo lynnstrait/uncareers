@@ -1,4 +1,4 @@
-name: UNIDO Job Alert
+name: UNIDO
 
 on:
   schedule:
