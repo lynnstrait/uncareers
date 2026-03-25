@@ -31,7 +31,7 @@ jobs:
           STATE_FILE: data/seen_un_careers.json
           MAX_ALERTS_PER_RUN: 10
           UN_CAREERS_LOCATION_FILTERS: "VIENNA,SEOUL"
-          DRY_RUN: "true"
+          DRY_RUN: "false"
           BOOTSTRAP_MODE: "false"
         run: python scripts/check_jobs.py
       - name: Commit state
