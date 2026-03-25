@@ -4,11 +4,11 @@ import sys
 import time
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
-
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from playwright.sync_api import sync_playwright
 
 from scripts.common.helpers import log, normalize_space, escape_html, format_dot_date, parse_any_date_to_ts
 from scripts.common.models import JobItem
