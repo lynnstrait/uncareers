@@ -1,4 +1,46 @@
+name: IAEA Job Alert
+
 on:
   schedule:
     - cron: "0,10,20,30,40,50 * * * *"
   workflow_dispatch:
+
+jobs:
+  check-jobs:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install feedparser
+
+      - name: Run checker
+        env:
+          SOURCE_ADAPTER: iaea
+          SOURCE_LABEL: IAEA
+          SOURCE_URL: ${{ secrets.IAEA_FEED_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          STATE_FILE: data/seen_iaea.json
+          MAX_ALERTS_PER_RUN: 10
+          DRY_RUN: "false"
+          BOOTSTRAP_MODE: "false"
+        run: python scripts/check_jobs.py
+
+      - name: Commit state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/seen_iaea.json
+          git diff --cached --quiet || git commit -m "Update seen_iaea.json"
+          git push
