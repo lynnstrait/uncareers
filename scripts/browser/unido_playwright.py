@@ -163,19 +163,24 @@ def fetch_detail_fields(browser, title: str, link: str) -> JobItem | None:
     try:
         page.goto(link, wait_until="domcontentloaded", timeout=90000)
         page.wait_for_timeout(3000)
-        text = page.locator("body").inner_text()
+        raw_text = page.locator("body").inner_text()
     finally:
         page.close()
 
-    text = normalize_space(text)
+    log(f"--- UNIDO DETAIL START: {title} ---")
+    log(raw_text[:2500])
+    log(f"--- UNIDO DETAIL END: {title} ---")
 
-    duty = extract_duty_station(text)
+    # keep both raw text and normalized text
+    text = normalize_space(raw_text)
+
+    duty = extract_duty_station(raw_text) or extract_duty_station(text)
     if duty.lower() != UNIDO_LOCATION_FILTER:
         return None
 
-    grade = extract_grade(text)
-    duration = extract_duration(text)
-    deadline = extract_application_deadline(text)
+    grade = extract_grade(raw_text) or extract_grade(text)
+    duration = extract_duration(raw_text) or extract_duration(text)
+    deadline = extract_application_deadline(raw_text) or extract_application_deadline(text)
 
     return JobItem(
         id=link,
