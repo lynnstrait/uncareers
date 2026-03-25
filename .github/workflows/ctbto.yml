@@ -28,8 +28,8 @@ jobs:
         env:
           SOURCE_ADAPTER: ctbto
           SOURCE_LABEL: CTBTO
-          SOURCE_URL: "https://career2.successfactors.eu/career?company=ctbtoprepa&career%5fns=job%5flisting%5fsummary&navBarLevel=JOB%5fSEARCH&_s.crb=YPVnvY2jkBN19%2fzpCZxYesJHDVTAqmBlqSCzctUrSpU%3d"
-          CTBTO_LOCATION_FILTER: "Vienna"
+          SOURCE_URL: "https://www.ctbto.org/work-with-us/employment"
+          CTBTO_LOCATION_FILTER: ""
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           STATE_FILE: data/seen_ctbto.json
