@@ -1,4 +1,47 @@
+name: CTBTO Job Alert
+
 on:
   schedule:
     - cron: "27,57 * * * *"
   workflow_dispatch:
+
+jobs:
+  check-jobs:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install feedparser
+
+      - name: Run checker
+        env:
+          SOURCE_ADAPTER: ctbto
+          SOURCE_LABEL: CTBTO
+          SOURCE_URL: "https://career2.successfactors.eu/career?company=ctbtoprepa&career%5fns=job%5flisting%5fsummary&navBarLevel=JOB%5fSEARCH&_s.crb=YPVnvY2jkBN19%2fzpCZxYesJHDVTAqmBlqSCzctUrSpU%3d"
+          CTBTO_LOCATION_FILTER: "Vienna"
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          STATE_FILE: data/seen_ctbto.json
+          MAX_ALERTS_PER_RUN: 10
+          DRY_RUN: "true"
+          BOOTSTRAP_MODE: "false"
+        run: python scripts/check_jobs.py
+
+      - name: Commit state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/seen_ctbto.json
+          git diff --cached --quiet || git commit -m "Update seen_ctbto.json"
+          git push
