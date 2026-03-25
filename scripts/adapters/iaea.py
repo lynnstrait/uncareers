@@ -1,8 +1,14 @@
 import re
 
-from scripts.common.helpers import fetch, strip_html, normalize_space, format_dot_date
-from scripts.common.models import JobItem
 from scripts.adapters.base import RSSAdapter
+from scripts.common.helpers import (
+    fetch,
+    strip_html,
+    normalize_space,
+    format_dot_date,
+    escape_html,
+)
+from scripts.common.models import JobItem
 
 
 class IAEAAdapter(RSSAdapter):
@@ -18,6 +24,7 @@ class IAEAAdapter(RSSAdapter):
         "grade",
         "duty station",
         "type/ duration of appointment",
+        "remuneration",
     }
 
     def clean_taleo_title(self, title: str) -> tuple[str, str]:
@@ -29,17 +36,17 @@ class IAEAAdapter(RSSAdapter):
             return title, level
         return title, ""
 
-    def extract_duration(self, description: str) -> str:
+    def extract_duration_from_description(self, description: str) -> str:
         for pattern in (
             r"Duration\s*\n\s*([^\n]+)",
             r"Duration[:\s]+([^\n]+)",
         ):
             m = re.search(pattern, description, re.IGNORECASE)
             if m:
-                return m.group(1).strip()
+                return normalize_space(m.group(1))
         return ""
 
-    def extract_closing_date(self, description: str) -> str:
+    def extract_closing_from_description(self, description: str) -> str:
         patterns = [
             r"Closing Date[:\s]+([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})",
             r"Closing date[:\s]+([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})",
@@ -50,7 +57,7 @@ class IAEAAdapter(RSSAdapter):
         for p in patterns:
             m = re.search(p, description, re.IGNORECASE)
             if m:
-                return m.group(1)
+                return normalize_space(m.group(1))
         return ""
 
     def extract_competitive(self, description: str) -> str:
@@ -61,7 +68,7 @@ class IAEAAdapter(RSSAdapter):
         for p in patterns:
             m = re.search(p, description, re.IGNORECASE)
             if m:
-                return m.group(1).strip()
+                return normalize_space(m.group(1))
         return ""
 
     def extract_page_field(self, page_text: str, field_name: str) -> str:
@@ -69,6 +76,7 @@ class IAEAAdapter(RSSAdapter):
         lines = [x for x in lines if x]
 
         for i, line in enumerate(lines):
+            # Case 1: label on its own line, value on next line
             if line.lower() == field_name.lower():
                 if i + 1 < len(lines):
                     next_line = lines[i + 1].strip()
@@ -76,6 +84,7 @@ class IAEAAdapter(RSSAdapter):
                         return ""
                     return next_line
 
+            # Case 2: "Field Name: value" on one line
             m = re.match(rf"^{re.escape(field_name)}\s*:\s*(.+)$", line, re.IGNORECASE)
             if m:
                 value = m.group(1).strip()
@@ -112,13 +121,13 @@ class IAEAAdapter(RSSAdapter):
             published = (item.get("published") or "").strip()
             link = (item.get("link") or "").strip()
 
-            title, level = self.clean_taleo_title(title_raw)
+            title, level_from_title = self.clean_taleo_title(title_raw)
             detail = self.fetch_detail_fields(link)
 
-            duration = detail.get("duration") or self.extract_duration(description)
+            duration = detail.get("duration") or self.extract_duration_from_description(description)
             competitive = detail.get("competitive") or self.extract_competitive(description)
             open_date = detail.get("open") or published
-            closing_date = detail.get("closing") or self.extract_closing_date(description)
+            closing_date = detail.get("closing") or self.extract_closing_from_description(description)
 
             job_id = item.get("guid") or link or title_raw
             jobs.append(
@@ -129,12 +138,12 @@ class IAEAAdapter(RSSAdapter):
                     link=link,
                     description=description,
                     published=published,
-                    level=level,
+                    level=level_from_title,
                     duration=duration,
                     competitive=competitive,
                     open_date=open_date,
                     closing_date=closing_date,
-                    raw_date=closing_date or published,
+                    raw_date=closing_date or open_date or published,
                 )
             )
 
@@ -142,22 +151,20 @@ class IAEAAdapter(RSSAdapter):
 
     def build_message(self, job: JobItem) -> str:
         parts = [
-            f"<b>{self.source_name}</b>",
+            f"<b>{escape_html(self.source_name)}</b>",
             "",
-            f"<b>{job.title}</b>",
+            f"<b>{escape_html(job.title)}</b>",
         ]
 
         if job.level:
-            parts.append(f"Level: {job.level}")
+            parts.append(f"Level: {escape_html(job.level)}")
         if job.duration:
-            parts.append(f"Duration: {job.duration}")
-        if job.competitive:
-            parts.append(f"Competitive: {job.competitive}")
+            parts.append(f"Duration: {escape_html(job.duration)}")
         if job.open_date:
-            parts.append(f"Open: {format_dot_date(job.open_date)}")
+            parts.append(f"Open: {escape_html(format_dot_date(job.open_date))}")
         if job.closing_date:
-            parts.append(f"Closing: {format_dot_date(job.closing_date)}")
+            parts.append(f"Closing: {escape_html(format_dot_date(job.closing_date))}")
         if job.link:
-            parts.append(f'<a href="{job.link}">Job Open</a>')
+            parts.append(f'<a href="{escape_html(job.link)}">Job Open</a>')
 
         return "\n".join(parts)
