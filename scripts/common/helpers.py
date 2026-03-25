@@ -57,6 +57,12 @@ def normalize_space(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip()
 
 
+def clean_link(link: str) -> str:
+    if not link:
+        return ""
+    return link.split("#", 1)[0].strip()
+
+
 def format_dot_date(date_str: str) -> str:
     if not date_str:
         return ""
