@@ -85,6 +85,8 @@ def format_dot_date(date_str: str) -> str:
         "%d/%m/%Y",
         "%m/%d/%Y",
         "%Y-%m-%d",
+        "%Y-%m-%d, %I:%M:%S %p",
+        "%Y-%m-%d, %H:%M:%S",
     ):
         try:
             dt = datetime.strptime(normalized, fmt)
