@@ -34,6 +34,12 @@ KEYWORDS = [k.strip().lower() for k in RAW_KEYWORD.split(",") if k.strip()]
 MAX_ALERTS_PER_RUN = int(os.environ.get("MAX_ALERTS_PER_RUN", "10"))
 STATE_FILE = Path(os.environ.get("STATE_FILE", "data/seen_jobs.json"))
 
+UN_CAREERS_LOCATION_FILTERS = [
+    x.strip().upper()
+    for x in os.environ.get("UN_CAREERS_LOCATION_FILTERS", "VIENNA,GENEVA,SEOUL").split(",")
+    if x.strip()
+]
+
 UNIDO_LOCATION_FILTER = os.environ.get("UNIDO_LOCATION_FILTER", "Vienna, Austria").strip().lower()
 CTBTO_LOCATION_FILTER = os.environ.get("CTBTO_LOCATION_FILTER", "").strip().lower()
 
@@ -414,6 +420,10 @@ class UNCareersAdapter(RSSAdapter):
             location = extract_field(description, "Duty Station")
             open_date = extract_field(description, "Posted Date")
             closing_date = extract_field(description, "Deadline")
+
+            normalized_location = location.strip().upper()
+            if normalized_location and normalized_location not in UN_CAREERS_LOCATION_FILTERS:
+                continue
 
             job_id = item.get("guid") or link or title
             jobs.append(JobItem(
