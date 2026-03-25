@@ -92,11 +92,10 @@ def clean_title(title: str, req_id: str) -> str:
     if not title:
         return f"CTBTO Vacancy {req_id}"
 
-    # remove leading generic labels
     title = re.sub(r"^(job title|title)\s*[:\-]?\s*", "", title, flags=re.I).strip()
+    title = re.sub(r"\s+", " ", title).strip()
 
-    # if still generic, fall back
-    if title.lower() in {"ctbto vacancy", "vacancy"}:
+    if title.lower() in {"ctbto vacancy", "vacancy", "job title", "title"}:
         return f"CTBTO Vacancy {req_id}"
 
     return title
@@ -180,9 +179,10 @@ def fetch_ctbto_jobs() -> list[dict]:
             continue
 
         title_raw = first_match(text, [
-            r"Job Title[:\s]+(.+?)(?:Grade Level|Grade|Division|Department|Section|Type of Appointment|Date of Issuance|Date of Issue|Deadline for Applications|Deadline)",
-            r"Title[:\s]+(.+?)(?:Grade Level|Grade|Division|Department|Section|Type of Appointment|Date of Issuance|Date of Issue|Deadline for Applications|Deadline)",
+            r"Job Title[:\s]+(.+?)(?:\n|Grade Level|Grade|Division|Department|Section|Type of Appointment|Date of Issuance|Date of Issue|Deadline for Applications|Deadline)",
+            r"Title[:\s]+(.+?)(?:\n|Grade Level|Grade|Division|Department|Section|Type of Appointment|Date of Issuance|Date of Issue|Deadline for Applications|Deadline)",
         ])
+     
         title = clean_title(title_raw, req_id)
 
         level = first_match(text, [
