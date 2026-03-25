@@ -78,6 +78,8 @@ def format_dot_date(date_str: str) -> str:
     for fmt in (
         "%b %d, %Y",
         "%B %d, %Y",
+        "%d %b %Y",
+        "%d %B %Y",
         "%d-%b-%Y",
         "%d-%B-%Y",
         "%d/%m/%Y",
