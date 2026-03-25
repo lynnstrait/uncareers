@@ -44,6 +44,15 @@ def strip_html(text: str) -> str:
     return text.strip()
 
 
+def escape_html(s: str) -> str:
+    return (
+        (s or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
 def normalize_space(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip()
 
