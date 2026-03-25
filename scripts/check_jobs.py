@@ -602,111 +602,109 @@ class UNIDOAdapter(SourceAdapter):
         value = value.replace("ISA -", "ISA-").replace("ISA - ", "ISA-")
         return value
 
-def parse_jobs_from_text(self, page_text: str) -> list[JobItem]:
-    jobs = []
+    def parse_jobs_from_text(self, page_text: str) -> list[JobItem]:
+        jobs = []
 
-    lines = [normalize_space(x) for x in page_text.split("\n")]
-    lines = [x for x in lines if x]
+        lines = [normalize_space(x) for x in page_text.split("\n")]
+        lines = [x for x in lines if x]
 
-    category_candidates = [
-        "International Professionals",
-        "General Service",
-        "Consultancy opportunities",
-        "Internship Programme",
-        "Project Appointments",
-        "Junior Professional Officer Programme(JPO)",
-        "Junior Professional Officer Programme",
-        "National Professional officers",
-        "Local Support Personnel",
-    ]
+        category_candidates = [
+            "International Professionals",
+            "General Service",
+            "Consultancy opportunities",
+            "Internship Programme",
+            "Project Appointments",
+            "Junior Professional Officer Programme(JPO)",
+            "Junior Professional Officer Programme",
+            "National Professional officers",
+            "Local Support Personnel",
+        ]
 
-    seen = set()
-    i = 0
+        seen = set()
+        i = 0
 
-    while i < len(lines):
-        line = lines[i]
+        while i < len(lines):
+            line = lines[i]
 
-        # record lines usually contain Vienna + category + grade + deadline
-        deadline_match = re.search(r"\b(\d{1,2}-[A-Za-z]{3}-\d{4})\b", line)
-        location_match = re.search(r"\bVienna,\s*Austria\b", line, re.IGNORECASE)
+            deadline_match = re.search(r"\b(\d{1,2}-[A-Za-z]{3}-\d{4})\b", line)
+            location_match = re.search(r"\bVienna,\s*Austria\b", line, re.IGNORECASE)
 
-        if not (deadline_match and location_match):
-            i += 1
-            continue
+            if not (deadline_match and location_match):
+                i += 1
+                continue
 
-        closing_date = deadline_match.group(1)
-        location = "Vienna, Austria"
+            closing_date = deadline_match.group(1)
+            location = "Vienna, Austria"
 
-        category = ""
-        for c in category_candidates:
-            if c.lower() in line.lower():
-                category = c
+            category = ""
+            for c in category_candidates:
+                if c.lower() in line.lower():
+                    category = c
+                    break
+
+            level = ""
+            m_level = re.search(
+                r"\b(ISA\s*-\s*[A-Z0-9]+|ISA-[A-Z0-9]+|[A-Z]+\d|Intern)\b",
+                line,
+                re.IGNORECASE,
+            )
+            if m_level:
+                level = self.normalize_grade(m_level.group(1))
+
+            title = ""
+            j = i - 1
+            while j >= 0:
+                prev = lines[j].strip()
+
+                if prev.lower() in {
+                    "title",
+                    "location",
+                    "category",
+                    "grade",
+                    "application deadline",
+                    "title location category grade application deadline",
+                }:
+                    j -= 1
+                    continue
+
+                if "vienna, austria" in prev.lower():
+                    j -= 1
+                    continue
+
+                if re.fullmatch(r"(ISA\s*-\s*[A-Z0-9]+|ISA-[A-Z0-9]+|[A-Z]+\d|Intern)", prev, re.IGNORECASE):
+                    j -= 1
+                    continue
+
+                title = prev
                 break
 
-        level = ""
-        m_level = re.search(
-            r"\b(ISA\s*-\s*[A-Z0-9]+|ISA-[A-Z0-9]+|[A-Z]+\d|Intern)\b",
-            line,
-            re.IGNORECASE,
-        )
-        if m_level:
-            level = self.normalize_grade(m_level.group(1))
+            title = normalize_space(title)
 
-        # title is usually the nearest meaningful line above the record line
-        title = ""
-        j = i - 1
-        while j >= 0:
-            prev = lines[j].strip()
-
-            if prev.lower() in {
-                "title",
-                "location",
-                "category",
-                "grade",
-                "application deadline",
-                "results 1 – 17 of 17",
-            }:
-                j -= 1
+            if not title:
+                i += 1
                 continue
 
-            if "vienna, austria" in prev.lower():
-                j -= 1
+            key = (title.lower(), location.lower(), level.lower(), closing_date.lower())
+            if key in seen:
+                i += 1
                 continue
+            seen.add(key)
 
-            if re.fullmatch(r"(ISA\s*-\s*[A-Z0-9]+|ISA-[A-Z0-9]+|[A-Z]+\d|Intern)", prev, re.IGNORECASE):
-                j -= 1
-                continue
+            jobs.append(JobItem(
+                id=f"unido:{title}|{location}|{level}|{closing_date}",
+                source=self.source_name,
+                title=title,
+                link=self.source_url,
+                location=location,
+                level=level,
+                category=category,
+                closing_date=closing_date,
+                raw_date=closing_date,
+            ))
 
-            title = prev
-            break
-
-        title = normalize_space(title)
-
-        if not title:
             i += 1
-            continue
 
-        key = (title.lower(), location.lower(), level.lower(), closing_date.lower())
-        if key in seen:
-            i += 1
-            continue
-        seen.add(key)
-
-        jobs.append(JobItem(
-            id=f"unido:{title}|{location}|{level}|{closing_date}",
-            source=self.source_name,
-            title=title,
-            link=self.source_url,
-            location=location,
-            level=level,
-            category=category,
-            closing_date=closing_date,
-            raw_date=closing_date,
-        ))
-
-        i += 1
-
-    return jobs
+        return jobs
 
     def fetch_jobs(self) -> list[JobItem]:
         html_bytes = fetch(self.source_url)
@@ -739,7 +737,6 @@ def parse_jobs_from_text(self, page_text: str) -> list[JobItem]:
             parts.append(f'<a href="{escape_html(job.link)}">Job Open</a>')
 
         return "\n".join(parts)
-
 
 # =========================================================
 # CTBTO adapter
