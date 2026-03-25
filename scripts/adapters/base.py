@@ -14,11 +14,8 @@ class SourceAdapter(ABC):
     def fetch_jobs(self) -> list[JobItem]:
         raise NotImplementedError
 
-    def matches_keyword(self, job: JobItem, keywords: list[str]) -> bool:
-        if not keywords:
-            return True
-        haystack = job.haystack()
-        return any(keyword in haystack for keyword in keywords)
+    def matches_keyword(self, job: JobItem) -> bool:
+        return True
 
     def is_real_job(self, job: JobItem) -> bool:
         title = (job.title or "").strip().lower()
