@@ -8,26 +8,21 @@ on:
 jobs:
   check-jobs:
     runs-on: ubuntu-latest
-
     permissions:
       contents: write
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Install dependencies
-        run: pip install feedparser beautifulsoup4
-
+        run: |
+          pip install playwright beautifulsoup4
+          python -m playwright install chromium
       - name: Run checker
         env:
-          SOURCE_ADAPTER: unido
-          SOURCE_LABEL: UNIDO
           SOURCE_URL: "https://careers.unido.org/search/?createNewAlert=false&q=&optionsFacetsDD_country=&optionsFacetsDD_lang=&optionsFacetsDD_department=&optionsFacetsDD_location=&locationsearch="
           UNIDO_LOCATION_FILTER: "Vienna, Austria"
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -36,8 +31,7 @@ jobs:
           MAX_ALERTS_PER_RUN: 10
           DRY_RUN: "true"
           BOOTSTRAP_MODE: "false"
-        run: python scripts/check_jobs.py
-
+        run: python scripts/browser/unido_playwright.py
       - name: Commit state
         run: |
           git config user.name "github-actions[bot]"

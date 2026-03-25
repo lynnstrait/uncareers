@@ -1,4 +1,4 @@
-name: IAEA
+name: IAEA Job Alert
 
 on:
   schedule:
@@ -8,22 +8,17 @@ on:
 jobs:
   check-jobs:
     runs-on: ubuntu-latest
-
     permissions:
       contents: write
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Install dependencies
         run: pip install feedparser
-
       - name: Run checker
         env:
           SOURCE_ADAPTER: iaea
@@ -36,7 +31,6 @@ jobs:
           DRY_RUN: "false"
           BOOTSTRAP_MODE: "false"
         run: python scripts/check_jobs.py
-
       - name: Commit state
         run: |
           git config user.name "github-actions[bot]"
