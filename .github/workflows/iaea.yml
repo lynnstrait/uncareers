@@ -1,4 +1,4 @@
-name: IAEA Job Alert
+name: IAEA
 
 on:
   schedule:
