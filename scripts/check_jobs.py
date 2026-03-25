@@ -595,114 +595,79 @@ class UNIDOAdapter(SourceAdapter):
     source_name = "UNIDO"
 
     def normalize_link(self, link: str) -> str:
-        return clean_link(link.split("?", 1)[0].strip())
+        return clean_link((link or "").split("?", 1)[0].strip())
 
     def normalize_grade(self, value: str) -> str:
         value = normalize_space(value)
         value = value.replace("ISA -", "ISA-").replace("ISA - ", "ISA-")
         return value
 
-    def parse_jobs_from_html(self, html_bytes: bytes) -> list[JobItem]:
-        text = html_bytes.decode("utf-8", errors="replace")
+    def parse_jobs_from_text(self, page_text: str) -> list[JobItem]:
+        jobs = []
 
-        pattern = re.compile(
-            r'<a[^>]+href="(?P<link>https://careers\.unido\.org/job/[^"]+|/job/[^"]+)"[^>]*>(?P<title>.*?)</a>',
-            re.IGNORECASE | re.DOTALL,
+        item_pattern = re.compile(
+            r'(?P<title>[^\n]+?)\s+'
+            r'(?P<location>[A-Za-z .\'\-]+,\s*[A-Za-z .\'\-]+)\s+'
+            r'(?P<category>International Professionals|General Service|Consultancy opportunities|Internship Programme|Project Appointments|Junior Professional Officer Programme\(JPO\)|Junior Professional Officer Programme|National Professional officers|Local Support Personnel)\s+'
+            r'(?P<grade>ISA\s*-\s*[A-Z0-9]+|ISA-[A-Z0-9]+|[A-Z]+\d|Intern)\s+'
+            r'(?P<deadline>\d{1,2}-[A-Za-z]{3}-\d{4})',
+            re.IGNORECASE
         )
 
-        matches = list(pattern.finditer(text))
-        if not matches:
-            return []
+        seen = set()
 
-        jobs = []
-        seen_urls = set()
+        for match in item_pattern.finditer(page_text):
+            title = normalize_space(match.group("title"))
+            location = normalize_space(match.group("location"))
+            category = normalize_space(match.group("category"))
+            level = self.normalize_grade(match.group("grade"))
+            closing_date = normalize_space(match.group("deadline"))
 
-        for idx, match in enumerate(matches):
-            raw_link = html.unescape(match.group("link")).strip()
-            link = urllib.parse.urljoin("https://careers.unido.org", raw_link)
-            link = self.normalize_link(link)
-
-            title = strip_html(match.group("title"))
-            if not title:
+            if title.lower() in {
+                "title",
+                "location",
+                "category",
+                "grade",
+                "application deadline",
+                "title location category grade application deadline",
+            }:
                 continue
 
-            start = match.end()
-            end = matches[idx + 1].start() if idx + 1 < len(matches) else min(len(text), start + 1200)
-            block = strip_html(text[start:end])
-            block = normalize_space(block)
-
-            deadline_match = re.search(r"(\d{1,2}-[A-Za-z]{3}-\d{4})", block)
-            deadline_raw = deadline_match.group(1) if deadline_match else ""
-
-            grade_match = re.search(
-                r"\b(ISA\s*-\s*[A-Z0-9]+|ISA-[A-Z0-9]+|[PDGNLFS]\d|D1|D2|Intern)\b",
-                block,
-                re.IGNORECASE,
-            )
-            level = self.normalize_grade(grade_match.group(1)) if grade_match else ""
-
-            category = ""
-            category_candidates = [
-                "International Professionals",
-                "General Service",
-                "Consultancy opportunities",
-                "Internship Programme",
-                "Project Appointments",
-                "Junior Professional Officer Programme(JPO)",
-                "Junior Professional Officer Programme",
-                "National Professional officers",
-                "Local Support Personnel",
-            ]
-            for c in category_candidates:
-                if c.lower() in block.lower():
-                    category = c
-                    break
-
-            location = ""
-            if category:
-                cat_match = re.search(re.escape(category), block, re.IGNORECASE)
-                if cat_match:
-                    location = block[:cat_match.start()].strip()
-            else:
-                temp = block
-                if deadline_raw:
-                    temp = temp.replace(deadline_raw, "").strip()
-                if level:
-                    temp = re.sub(re.escape(level) + r"\b", "", temp, flags=re.IGNORECASE).strip()
-                location = temp.strip()
-
-            location = normalize_space(location)
-
-            if not location:
-                continue
             if location.lower() != UNIDO_LOCATION_FILTER:
                 continue
-            if link in seen_urls:
-                continue
 
-            seen_urls.add(link)
+            link = self.source_url
+
+            key = (title.lower(), location.lower(), level.lower(), closing_date.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+
             jobs.append(JobItem(
-                id=link,
+                id=f"unido:{title}|{location}|{level}|{closing_date}",
                 source=self.source_name,
                 title=title,
                 link=link,
                 location=location,
                 level=level,
                 category=category,
-                closing_date=deadline_raw,
-                raw_date=deadline_raw,
+                closing_date=closing_date,
+                raw_date=closing_date,
             ))
 
         return jobs
 
     def fetch_jobs(self) -> list[JobItem]:
         html_bytes = fetch(self.source_url)
-        return self.parse_jobs_from_html(html_bytes)
+        text = html_bytes.decode("utf-8", errors="replace")
+        page_text = strip_html(text)
 
-    def is_real_job(self, job: JobItem) -> bool:
-        if not super().is_real_job(job):
-            return False
-        return "/job/" in (job.link or "").lower()
+        m = re.search(r"Results\s+\d+\s+[–-]\s+\d+\s+of\s+(\d+)", page_text, re.IGNORECASE)
+        if m:
+            log(f"UNIDO page reports total results: {m.group(1)}")
+
+        jobs = self.parse_jobs_from_text(page_text)
+        return jobs
 
     def build_message(self, job: JobItem) -> str:
         parts = [
