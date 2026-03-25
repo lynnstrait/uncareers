@@ -119,6 +119,16 @@ class IAEAAdapter(RSSAdapter):
             "grade": self.extract_page_field(page_text, "Grade"),
         }
 
+    def normalize_duration(self, duration_raw: str) -> str:
+        duration = normalize_space(duration_raw or "")
+        if not duration:
+            return ""
+
+        if re.fullmatch(r"\d+", duration):
+            return f"{duration} months"
+
+        return duration
+
     def fetch_jobs(self) -> list[JobItem]:
         items = self.fetch_rss_items()
         jobs = []
@@ -137,11 +147,7 @@ class IAEAAdapter(RSSAdapter):
 
                 level = level_from_title or detail.get("grade", "")
                 duration_raw = detail.get("duration") or self.extract_duration_from_description(description)
-                duration = ""
-                if duration_raw:
-                    duration = normalize_space(duration_raw)
-                    if re.fullmatch(r"\d+", duration):
-                        duration = f"{duration} months"             
+                duration = self.normalize_duration(duration_raw)
                 open_date = detail.get("open") or published
                 closing_date = detail.get("closing") or self.extract_closing_from_description(description)
 
