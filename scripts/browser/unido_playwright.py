@@ -39,21 +39,19 @@ DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() == "true"
 BOOTSTRAP_MODE = os.environ.get("BOOTSTRAP_MODE", "false").strip().lower() == "true"
 
 
-CATEGORY_CANDIDATES = [
-    "International Professionals",
-    "General Service",
-    "Consultancy opportunities",
-    "Internship Programme",
-    "Project Appointments",
-    "Junior Professional Officer Programme(JPO)",
-    "Junior Professional Officer Programme",
-    "National Professional officers",
-    "Local Support Personnel",
-]
-
-
 def extract_category(text: str) -> str:
-    for c in CATEGORY_CANDIDATES:
+    candidates = [
+        "International Professionals",
+        "General Service",
+        "Consultancy opportunities",
+        "Internship Programme",
+        "Project Appointments",
+        "Junior Professional Officer Programme(JPO)",
+        "Junior Professional Officer Programme",
+        "National Professional officers",
+        "Local Support Personnel",
+    ]
+    for c in candidates:
         if c.lower() in text.lower():
             return c
     return ""
@@ -113,100 +111,103 @@ def build_message(job: JobItem) -> str:
     return "\n".join(parts)
 
 
-def fetch_rendered_page() -> tuple[str, str]:
+def fetch_jobs() -> list[JobItem]:
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
-        page.goto(SOURCE_URL, wait_until="networkidle", timeout=90000)
-        page.wait_for_timeout(5000)
-        html = page.content()
-        text = page.locator("body").inner_text()
+        page.goto(SOURCE_URL, wait_until="domcontentloaded", timeout=90000)
+        page.wait_for_timeout(6000)
+
+        records = page.eval_on_selector_all(
+            'a[href*="/job/"]',
+            """
+            (anchors) => {
+              function norm(s) {
+                return (s || "").replace(/\\s+/g, " ").trim();
+              }
+
+              const out = [];
+
+              for (const a of anchors) {
+                const href = a.getAttribute("href") || "";
+                const title = norm(a.innerText || a.textContent || "");
+                if (!href || !title) continue;
+
+                let node = a;
+                let bestText = "";
+                let depth = 0;
+
+                while (node && depth < 8) {
+                  const txt = norm(node.innerText || node.textContent || "");
+                  if (txt && txt.toLowerCase().includes("vienna, austria")) {
+                    if (!bestText || txt.length < bestText.length) {
+                      bestText = txt;
+                    }
+                  }
+                  node = node.parentElement;
+                  depth += 1;
+                }
+
+                // Fallback: look at nearby siblings if ancestor search failed
+                if (!bestText && a.parentElement) {
+                  let txts = [];
+                  let sib = a.parentElement.previousElementSibling;
+                  let count = 0;
+                  while (sib && count < 3) {
+                    txts.push(norm(sib.innerText || sib.textContent || ""));
+                    sib = sib.previousElementSibling;
+                    count += 1;
+                  }
+                  sib = a.parentElement.nextElementSibling;
+                  count = 0;
+                  while (sib && count < 3) {
+                    txts.push(norm(sib.innerText || sib.textContent || ""));
+                    sib = sib.nextElementSibling;
+                    count += 1;
+                  }
+                  const merged = norm(txts.join(" | "));
+                  if (merged.toLowerCase().includes("vienna, austria")) {
+                    bestText = merged;
+                  }
+                }
+
+                out.push({
+                  href,
+                  title,
+                  context: bestText
+                });
+              }
+
+              return out;
+            }
+            """,
+        )
+
         browser.close()
-        return html, text
-
-
-def build_title_to_links(html: str) -> dict[str, list[str]]:
-    title_to_links: dict[str, list[str]] = {}
-
-    for m in re.finditer(
-        r'<a[^>]+href="(?P<link>https://careers\.unido\.org/job/[^"]+|/job/[^"]+)"[^>]*>(?P<title>.*?)</a>',
-        html,
-        re.I | re.S,
-    ):
-        href = (m.group("link") or "").strip()
-        title = re.sub(r"<[^>]+>", " ", m.group("title") or "")
-        title = normalize_space(title)
-
-        if not title or not href:
-            continue
-
-        link = href if href.startswith("http") else f"https://careers.unido.org{href}"
-        title_to_links.setdefault(title, []).append(link)
-
-    return title_to_links
-
-
-def parse_jobs_from_page_text(page_text: str, title_to_links: dict[str, list[str]]) -> list[JobItem]:
-    lines = [normalize_space(x) for x in page_text.split("\n")]
-    lines = [x for x in lines if x]
 
     jobs: list[JobItem] = []
     seen_links = set()
 
-    i = 0
-    while i + 2 < len(lines):
-        title_line = lines[i]
-        summary_line = lines[i + 1]
-        metadata_line = lines[i + 2]
+    for rec in records:
+        href = normalize_space(rec.get("href", ""))
+        title = normalize_space(rec.get("title", ""))
+        context = normalize_space(rec.get("context", ""))
 
-        # skip obvious noise/header rows
-        if title_line.lower() in {
-            "title",
-            "location",
-            "category",
-            "grade",
-            "application deadline",
-            "title location category grade application deadline",
-            "reset",
-            "search results",
-        }:
-            i += 1
+        if not href or not title or not context:
             continue
 
-        # expected 3-line pattern:
-        # title
-        # title + Vienna, Austria + grade
-        # Vienna, Austria + category + grade + deadline
-        if title_line not in summary_line:
-            i += 1
-            continue
+        link = href if href.startswith("http") else f"https://careers.unido.org{href}"
 
-        if "vienna, austria" not in metadata_line.lower():
-            i += 1
-            continue
-
-        duty = "Vienna, Austria"
-        grade = extract_grade(metadata_line or summary_line)
-        category = extract_category(metadata_line)
-        duration = extract_duration(metadata_line) or extract_duration(summary_line)
-        deadline = extract_application_deadline(metadata_line)
-
+        duty = extract_duty(context)
         if duty.lower() != UNIDO_LOCATION_FILTER:
-            i += 1
             continue
 
-        if not deadline:
-            i += 1
-            continue
+        grade = extract_grade(context)
+        category = extract_category(context)
+        duration = extract_duration(context)
+        deadline = extract_application_deadline(context)
 
-        link_queue = title_to_links.get(title_line, [])
-        if not link_queue:
-            i += 1
-            continue
-
-        link = link_queue.pop(0)
         if link in seen_links:
-            i += 1
             continue
         seen_links.add(link)
 
@@ -214,7 +215,7 @@ def parse_jobs_from_page_text(page_text: str, title_to_links: dict[str, list[str
             JobItem(
                 id=link,
                 source=SOURCE_LABEL,
-                title=title_line,
+                title=title,
                 link=link,
                 location=duty,
                 level=grade,
@@ -225,15 +226,6 @@ def parse_jobs_from_page_text(page_text: str, title_to_links: dict[str, list[str
             )
         )
 
-        i += 3
-
-    return jobs
-
-
-def fetch_jobs() -> list[JobItem]:
-    html, page_text = fetch_rendered_page()
-    title_to_links = build_title_to_links(html)
-    jobs = parse_jobs_from_page_text(page_text, title_to_links)
     return jobs
 
 
