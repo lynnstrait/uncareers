@@ -13,14 +13,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from bs4 import BeautifulSoup
 
 import feedparser
 
-
-# =========================================================
-# Environment
-# =========================================================
 
 SOURCE_ADAPTER = os.environ["SOURCE_ADAPTER"].strip().lower()
 SOURCE_LABEL = os.environ.get("SOURCE_LABEL", SOURCE_ADAPTER.upper()).strip()
@@ -48,10 +43,6 @@ DISABLE_WEB_PAGE_PREVIEW = os.environ.get("DISABLE_WEB_PAGE_PREVIEW", "false").s
 DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() == "true"
 BOOTSTRAP_MODE = os.environ.get("BOOTSTRAP_MODE", "false").strip().lower() == "true"
 
-
-# =========================================================
-# Logging / IO
-# =========================================================
 
 def log(msg: str) -> None:
     print(msg, flush=True)
@@ -107,19 +98,10 @@ def telegram_send(message_html: str) -> None:
         method="POST",
     )
 
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-            log(f"Telegram response: {body[:500]}")
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8", errors="replace")
-        log(f"Telegram HTTPError {e.code}: {error_body}")
-        raise
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        body = resp.read().decode("utf-8", errors="replace")
+        log(f"Telegram response: {body[:500]}")
 
-
-# =========================================================
-# Helpers
-# =========================================================
 
 def strip_html(text: str) -> str:
     text = html.unescape(text or "")
@@ -130,15 +112,6 @@ def strip_html(text: str) -> str:
     text = re.sub(r"<[^>]+>", "\n", text)
     text = re.sub(r"\n+", "\n", text)
     text = re.sub(r"[ \t]+", " ", text)
-
-    replacements = {
-        "�셲": "’s",
-        "�": "'",
-        "\xa0": " ",
-    }
-    for bad, good in replacements.items():
-        text = text.replace(bad, good)
-
     return text.strip()
 
 
@@ -182,11 +155,6 @@ def format_dot_date(date_str: str) -> str:
         except ValueError:
             pass
 
-    m = re.search(r"(\d{2})/(\d{2})/(\d{4})", normalized)
-    if m:
-        mm, dd, yyyy = m.groups()
-        return f"{yyyy}. {mm}. {dd}."
-
     return date_str
 
 
@@ -228,14 +196,12 @@ def extract_tag(block: str, tag: str) -> str:
 def parse_rss_fallback(xml_bytes: bytes) -> list[dict]:
     text = xml_bytes.decode("utf-8", errors="replace")
     items = []
-
     for block in re.findall(r"<item\b.*?>.*?</item>", text, re.IGNORECASE | re.DOTALL):
         title = extract_tag(block, "title")
         link = extract_tag(block, "link")
         description = extract_tag(block, "description")
         pub_date = extract_tag(block, "pubDate")
         guid = extract_tag(block, "guid")
-
         if title or link:
             items.append({
                 "title": title,
@@ -244,39 +210,18 @@ def parse_rss_fallback(xml_bytes: bytes) -> list[dict]:
                 "published": pub_date,
                 "guid": guid,
             })
-
     return items
 
 
 def parse_rss(xml_bytes: bytes) -> list[dict]:
     feed = feedparser.parse(xml_bytes)
-
-    if getattr(feed, "bozo", 0):
-        log(f"Feed parser warning: {feed.bozo_exception}")
-
     items = []
     for entry in feed.entries:
         title = (getattr(entry, "title", "") or "").strip()
         link = (getattr(entry, "link", "") or "").strip()
-
-        description = ""
-        if hasattr(entry, "summary"):
-            description = entry.summary
-        elif hasattr(entry, "description"):
-            description = entry.description
-
-        published = ""
-        if hasattr(entry, "published"):
-            published = entry.published
-        elif hasattr(entry, "updated"):
-            published = entry.updated
-
-        guid = ""
-        if hasattr(entry, "id"):
-            guid = entry.id
-        elif hasattr(entry, "guid"):
-            guid = entry.guid
-
+        description = getattr(entry, "summary", "") or getattr(entry, "description", "")
+        published = getattr(entry, "published", "") or getattr(entry, "updated", "")
+        guid = getattr(entry, "id", "") or getattr(entry, "guid", "")
         items.append({
             "title": title,
             "link": link,
@@ -284,14 +229,9 @@ def parse_rss(xml_bytes: bytes) -> list[dict]:
             "published": (published or "").strip(),
             "guid": (guid or "").strip(),
         })
-
     if items:
         return items
-
-    log("feedparser returned 0 items, trying fallback parser...")
-    fallback_items = parse_rss_fallback(xml_bytes)
-    log(f"Fallback parser items: {len(fallback_items)}")
-    return fallback_items
+    return parse_rss_fallback(xml_bytes)
 
 
 def extract_field(description: str, field_name: str) -> str:
@@ -310,10 +250,6 @@ def clean_link(link: str) -> str:
         return ""
     return link.split("#", 1)[0].strip()
 
-
-# =========================================================
-# Job model
-# =========================================================
 
 @dataclass
 class JobItem:
@@ -335,12 +271,7 @@ class JobItem:
     raw_date: str = ""
 
     def sort_ts(self) -> float:
-        for candidate in (
-            self.raw_date,
-            self.closing_date,
-            self.published,
-            self.open_date,
-        ):
+        for candidate in (self.raw_date, self.closing_date, self.published, self.open_date):
             ts = parse_any_date_to_ts(candidate)
             if ts > 0:
                 return ts
@@ -360,10 +291,6 @@ class JobItem:
             self.appointment_type,
         ]).lower()
 
-
-# =========================================================
-# Adapter base
-# =========================================================
 
 class SourceAdapter(ABC):
     source_name: str = "unknown"
@@ -394,10 +321,6 @@ class SourceAdapter(ABC):
         raise NotImplementedError
 
 
-# =========================================================
-# RSS adapters
-# =========================================================
-
 class RSSAdapter(SourceAdapter, ABC):
     def fetch_rss_items(self) -> list[dict]:
         xml_bytes = fetch(self.source_url)
@@ -410,7 +333,6 @@ class UNCareersAdapter(RSSAdapter):
     def fetch_jobs(self) -> list[JobItem]:
         items = self.fetch_rss_items()
         jobs = []
-
         for item in items:
             title = (item.get("title") or "").strip()
             description = (item.get("description") or "").strip()
@@ -441,16 +363,10 @@ class UNCareersAdapter(RSSAdapter):
                 closing_date=closing_date,
                 raw_date=closing_date or (item.get("published") or ""),
             ))
-
         return jobs
 
     def build_message(self, job: JobItem) -> str:
-        parts = [
-            f"<b>{escape_html(self.source_name)}</b>",
-            "",
-            f"<b>{escape_html(job.title)}</b>",
-        ]
-
+        parts = [f"<b>{escape_html(self.source_name)}</b>", "", f"<b>{escape_html(job.title)}</b>"]
         if job.location:
             parts.append(f"Location: {escape_html(job.location)}")
         if job.level:
@@ -463,7 +379,6 @@ class UNCareersAdapter(RSSAdapter):
             parts.append(f"Closing: {escape_html(format_dot_date(job.closing_date))}")
         if job.link:
             parts.append(f'<a href="{escape_html(job.link)}">Job Open</a>')
-
         return "\n".join(parts)
 
 
@@ -480,10 +395,7 @@ class IAEAAdapter(RSSAdapter):
         return title, ""
 
     def extract_duration(self, description: str) -> str:
-        for pattern in (
-            r"Duration\s*\n\s*([^\n]+)",
-            r"Duration[:\s]+([^\n]+)",
-        ):
+        for pattern in (r"Duration\s*\n\s*([^\n]+)", r"Duration[:\s]+([^\n]+)"):
             m = re.search(pattern, description, re.IGNORECASE)
             if m:
                 return m.group(1).strip()
@@ -504,11 +416,7 @@ class IAEAAdapter(RSSAdapter):
         return ""
 
     def extract_competitive(self, description: str) -> str:
-        patterns = [
-            r"Full Competitive Recruitment[:\s]+([^\n]+)",
-            r"Competitive[:\s]+([^\n]+)",
-        ]
-        for p in patterns:
+        for p in (r"Full Competitive Recruitment[:\s]+([^\n]+)", r"Competitive[:\s]+([^\n]+)"):
             m = re.search(p, description, re.IGNORECASE)
             if m:
                 return m.group(1).strip()
@@ -517,21 +425,16 @@ class IAEAAdapter(RSSAdapter):
     def extract_page_field(self, page_text: str, field_name: str) -> str:
         pattern = rf"{re.escape(field_name)}\s*:\s*(.*?)(?:\n|$)"
         m = re.search(pattern, page_text, re.IGNORECASE)
-        if m:
-            return m.group(1).strip()
-        return ""
+        return m.group(1).strip() if m else ""
 
     def fetch_detail_fields(self, link: str) -> dict:
         if not link:
             return {}
-
         try:
             html_bytes = fetch(link, timeout=30)
             page_text = strip_html(html_bytes.decode("utf-8", errors="replace"))
-        except Exception as e:
-            log(f"Failed to fetch IAEA detail page: {e}")
+        except Exception:
             return {}
-
         return {
             "open": self.extract_page_field(page_text, "Job Posting"),
             "closing": self.extract_page_field(page_text, "Closing Date"),
@@ -542,7 +445,6 @@ class IAEAAdapter(RSSAdapter):
     def fetch_jobs(self) -> list[JobItem]:
         items = self.fetch_rss_items()
         jobs = []
-
         for item in items:
             title_raw = (item.get("title") or "").strip()
             description = (item.get("description") or "").strip()
@@ -572,16 +474,10 @@ class IAEAAdapter(RSSAdapter):
                 closing_date=closing_date,
                 raw_date=closing_date or published,
             ))
-
         return jobs
 
     def build_message(self, job: JobItem) -> str:
-        parts = [
-            f"<b>{escape_html(self.source_name)}</b>",
-            "",
-            f"<b>{escape_html(job.title)}</b>",
-        ]
-
+        parts = [f"<b>{escape_html(self.source_name)}</b>", "", f"<b>{escape_html(job.title)}</b>"]
         if job.level:
             parts.append(f"Level: {escape_html(job.level)}")
         if job.duration:
@@ -594,378 +490,19 @@ class IAEAAdapter(RSSAdapter):
             parts.append(f"Closing: {escape_html(format_dot_date(job.closing_date))}")
         if job.link:
             parts.append(f'<a href="{escape_html(job.link)}">Job Open</a>')
-
         return "\n".join(parts)
 
-
-# =========================================================
-# UNIDO adapter
-# =========================================================
-
-class UNIDOAdapter(SourceAdapter):
-    source_name = "UNIDO"
-
-    CATEGORY_CANDIDATES = [
-        "International Professionals",
-        "General Service",
-        "Consultancy opportunities",
-        "Internship Programme",
-        "Project Appointments",
-        "Junior Professional Officer Programme(JPO)",
-        "Junior Professional Officer Programme",
-        "National Professional officers",
-        "Local Support Personnel",
-    ]
-
-    def normalize_link(self, link: str) -> str:
-        link = html.unescape(link or "").strip()
-        if not link:
-            return ""
-        link = urllib.parse.urljoin("https://careers.unido.org", link)
-        return clean_link(link.split("?", 1)[0].strip())
-
-    def normalize_grade(self, value: str) -> str:
-        value = normalize_space(value)
-        value = value.replace("ISA -", "ISA-").replace("ISA - ", "ISA-")
-        return value
-
-    def _extract_category(self, text: str) -> str:
-        for c in self.CATEGORY_CANDIDATES:
-            if c.lower() in text.lower():
-                return c
-        return ""
-
-    def _extract_level(self, text: str) -> str:
-        m = re.search(
-            r"\b(ISA\s*-\s*[A-Z0-9]+|ISA-[A-Z0-9]+|[PDGNLFS]\d|D1|D2|Intern|L2|P5|G4|G5)\b",
-            text,
-            re.IGNORECASE,
-        )
-        return self.normalize_grade(m.group(1)) if m else ""
-
-    def _extract_deadline(self, text: str) -> str:
-        m = re.search(r"\b(\d{1,2}-[A-Za-z]{3}-\d{4})\b", text)
-        return m.group(1) if m else ""
-
-    def _extract_location(self, text: str) -> str:
-        m = re.search(r"\b([A-Za-z .'\-]+,\s*[A-Za-z .'\-]+)\b", text)
-        return normalize_space(m.group(1)) if m else ""
-
-    def _get_nearby_text(self, anchor) -> str:
-        """
-        Gather text from the anchor's nearest meaningful container.
-        This avoids brittle fixed-character slicing.
-        """
-        candidates = []
-
-        # direct parent
-        if anchor.parent:
-            candidates.append(anchor.parent.get_text(" ", strip=True))
-
-        # grandparent
-        if getattr(anchor.parent, "parent", None):
-            candidates.append(anchor.parent.parent.get_text(" ", strip=True))
-
-        # next few siblings
-        sib = anchor.parent.next_sibling if anchor.parent else anchor.next_sibling
-        steps = 0
-        while sib is not None and steps < 6:
-            if hasattr(sib, "get_text"):
-                txt = sib.get_text(" ", strip=True)
-            else:
-                txt = normalize_space(str(sib))
-            if txt:
-                candidates.append(txt)
-            sib = getattr(sib, "next_sibling", None)
-            steps += 1
-
-        merged = " | ".join([normalize_space(x) for x in candidates if normalize_space(x)])
-        return merged
-
-    def fetch_jobs(self) -> list[JobItem]:
-        html_bytes = fetch(self.source_url)
-        html_text = html_bytes.decode("utf-8", errors="replace")
-        page_text = strip_html(html_text)
-
-        m = re.search(r"Results\s+\d+\s+[–-]\s+\d+\s+of\s+(\d+)", page_text, re.IGNORECASE)
-        if m:
-            log(f"UNIDO page reports total results: {m.group(1)}")
-
-        soup = BeautifulSoup(html_text, "html.parser")
-
-        anchors = soup.find_all("a", href=True)
-        jobs: list[JobItem] = []
-        seen_links: set[str] = set()
-
-        for a in anchors:
-            href = a.get("href", "").strip()
-            if "/job/" not in href and "careers.unido.org/job/" not in href:
-                continue
-
-            title = normalize_space(a.get_text(" ", strip=True))
-            link = self.normalize_link(href)
-
-            if not title or not link:
-                continue
-
-            nearby_text = self._get_nearby_text(a)
-
-            location = self._extract_location(nearby_text)
-            category = self._extract_category(nearby_text)
-            level = self._extract_level(nearby_text)
-            closing_date = self._extract_deadline(nearby_text)
-
-            if location.lower() != UNIDO_LOCATION_FILTER:
-                continue
-
-            # link-only dedupe
-            if link in seen_links:
-                continue
-            seen_links.add(link)
-
-            jobs.append(JobItem(
-                id=link,
-                source=self.source_name,
-                title=title,
-                link=link,
-                location=location,
-                level=level,
-                category=category,
-                closing_date=closing_date,
-                raw_date=closing_date,
-            ))
-
-        return jobs
-
-    def build_message(self, job: JobItem) -> str:
-        parts = [
-            f"<b>{escape_html(self.source_name)}</b>",
-            "",
-            f"<b>{escape_html(job.title)}</b>",
-        ]
-
-        if job.location:
-            parts.append(f"Location: {escape_html(job.location)}")
-        if job.level:
-            parts.append(f"Level: {escape_html(job.level)}")
-        if job.category:
-            parts.append(f"Dept: {escape_html(job.category)}")
-        if job.closing_date:
-            parts.append(f"Closing: {escape_html(format_dot_date(job.closing_date))}")
-        if job.link:
-            parts.append(f'<a href="{escape_html(job.link)}">Job Open</a>')
-
-        return "\n".join(parts)
-
-
-# =========================================================
-# CTBTO adapter
-# =========================================================
-
-class CTBTOAdapter(SourceAdapter):
-    source_name = "CTBTO"
-
-    def normalize_sf_link(self, link: str) -> str:
-        link = html.unescape(link or "").strip()
-        if not link:
-            return ""
-        if link.startswith("/career"):
-            link = urllib.parse.urljoin("https://career2.successfactors.eu", link)
-        return clean_link(link)
-
-    def extract_query_param(self, url: str, key: str) -> str:
-        try:
-            parsed = urllib.parse.urlparse(url)
-            query = urllib.parse.parse_qs(parsed.query)
-            values = query.get(key, [])
-            return values[0].strip() if values else ""
-        except Exception:
-            return ""
-
-    def build_job_id_from_link(self, link: str) -> str:
-        req_id = self.extract_query_param(link, "career_job_req_id")
-        if req_id:
-            return f"ctbto:{req_id}"
-        return f"ctbto:{link}"
-
-    def parse_detail_page(self, link: str) -> JobItem | None:
-        try:
-            html_bytes = fetch(link, timeout=30)
-            page_text = strip_html(html_bytes.decode("utf-8", errors="replace"))
-        except Exception as e:
-            log(f"Failed to fetch CTBTO detail page: {e}")
-            return None
-
-        lowered = page_text.lower()
-        if "this job cannot be viewed at the moment" in lowered:
-            return None
-        if "is no longer available for application" in lowered:
-            return None
-
-        def first_match(patterns: list[str]) -> str:
-            for p in patterns:
-                m = re.search(p, page_text, re.IGNORECASE)
-                if m:
-                    return m.group(1).strip()
-            return ""
-
-        title = first_match([
-            r"Job title[:\s]+([^\n]+)",
-            r"Title[:\s]+([^\n]+)",
-            r"#\s*([^\n]+)",
-        ])
-
-        level = first_match([
-            r"Grade Level[:\s]+([^\n]+)",
-            r"Grade[:\s]+([^\n]+)",
-        ])
-
-        dept = first_match([
-            r"Division[:\s]+([^\n]+)",
-            r"Department[:\s]+([^\n]+)",
-        ])
-
-        appointment_type = first_match([
-            r"Type of Appointment[:\s]+([^\n]+)",
-        ])
-
-        open_date = first_match([
-            r"Date of Issuance[:\s]+([^\n]+)",
-            r"Date of Issue[:\s]+([^\n]+)",
-            r"Date Posted[:\s]+([^\n]+)",
-        ])
-
-        closing_date = first_match([
-            r"Deadline for Applications[:\s]+([^\n]+)",
-            r"Deadline[:\s]+([^\n]+)",
-            r"Application deadline[:\s]+([^\n]+)",
-        ])
-
-        location = "Vienna, Austria" if re.search(r"vienna", page_text, re.IGNORECASE) else ""
-
-        if not title:
-            req_id = self.extract_query_param(link, "career_job_req_id")
-            title = f"CTBTO Vacancy {req_id}" if req_id else "CTBTO Vacancy"
-
-        return JobItem(
-            id=self.build_job_id_from_link(link),
-            source=self.source_name,
-            title=title,
-            link=link,
-            description=page_text[:1500],
-            location=location,
-            level=level,
-            department=dept,
-            appointment_type=appointment_type,
-            open_date=open_date,
-            closing_date=closing_date,
-            raw_date=closing_date or open_date,
-        )
-
-    def extract_successfactors_links(self, text: str) -> list[str]:
-        links = set()
-
-        for m in re.finditer(
-            r'https://career2\.successfactors\.eu/career\?[^"\s<>]+career_job_req_id=\d+[^"\s<>]*',
-            text,
-            re.IGNORECASE,
-        ):
-            links.add(self.normalize_sf_link(m.group(0)))
-
-        for m in re.finditer(
-            r'/career\?[^"\s<>]+career_job_req_id=\d+[^"\s<>]*',
-            text,
-            re.IGNORECASE,
-        ):
-            links.add(self.normalize_sf_link(m.group(0)))
-
-        for req_id in set(re.findall(r'career_job_req_id[=:\\/"]+(\d+)', text, re.IGNORECASE)):
-            link = (
-                "https://career2.successfactors.eu/career?"
-                f"company=ctbtoprepa&career_ns=job_listing&navBarLevel=JOB_SEARCH"
-                f"&career_job_req_id={req_id}&selected_lang=en_GB&rcm_site_locale=en_GB"
-            )
-            links.add(self.normalize_sf_link(link))
-
-        return [x for x in links if x]
-
-    def fetch_jobs(self) -> list[JobItem]:
-        html_bytes = fetch(self.source_url)
-        text = html_bytes.decode("utf-8", errors="replace")
-
-        links = self.extract_successfactors_links(text)
-        log(f"CTBTO discovered links: {len(links)}")
-
-        jobs = []
-        seen_ids = set()
-
-        for link in links:
-            job = self.parse_detail_page(link)
-            if not job:
-                continue
-            if CTBTO_LOCATION_FILTER and CTBTO_LOCATION_FILTER not in (job.location or "").lower():
-                continue
-            if job.id in seen_ids:
-                continue
-            seen_ids.add(job.id)
-            jobs.append(job)
-
-        return jobs
-
-    def is_real_job(self, job: JobItem) -> bool:
-        if not super().is_real_job(job):
-            return False
-
-        title = (job.title or "").strip().lower()
-        if title in {"loading", "career opportunities", "ctbto vacancy"}:
-            return False
-        return True
-
-    def build_message(self, job: JobItem) -> str:
-        parts = [
-            f"<b>{escape_html(self.source_name)}</b>",
-            "",
-            f"<b>{escape_html(job.title)}</b>",
-        ]
-
-        if job.level:
-            parts.append(f"Level: {escape_html(job.level)}")
-        if job.department:
-            parts.append(f"Dept: {escape_html(job.department)}")
-        if job.appointment_type:
-            parts.append(f"Type: {escape_html(job.appointment_type)}")
-        if job.open_date:
-            parts.append(f"Open: {escape_html(format_dot_date(job.open_date))}")
-        if job.closing_date:
-            parts.append(f"Closing: {escape_html(format_dot_date(job.closing_date))}")
-        if job.link:
-            parts.append(f'<a href="{escape_html(job.link)}">Job Open</a>')
-
-        return "\n".join(parts)
-
-
-# =========================================================
-# Adapter registry
-# =========================================================
 
 def get_adapter(name: str, source_url: str) -> SourceAdapter:
     registry: dict[str, type[SourceAdapter]] = {
         "iaea": IAEAAdapter,
         "un_careers": UNCareersAdapter,
-        "unido": UNIDOAdapter,
-        "ctbto": CTBTOAdapter,
     }
-
     adapter_cls = registry.get(name.lower())
     if not adapter_cls:
-        raise ValueError(f"Unsupported SOURCE_ADAPTER: {name}")
-
+        raise ValueError(f"Unsupported SOURCE_ADAPTER for check_jobs.py: {name}")
     return adapter_cls(source_url)
 
-
-# =========================================================
-# Main pipeline
-# =========================================================
 
 def main() -> int:
     log(f"Source adapter: {SOURCE_ADAPTER}")
@@ -988,19 +525,16 @@ def main() -> int:
         return 1
 
     log(f"Fetched jobs: {len(jobs)}")
-
     if not jobs:
         log("No jobs found.")
         return 0
 
     jobs = [job for job in jobs if adapter.is_real_job(job) and adapter.matches_keyword(job)]
     jobs.sort(key=lambda x: x.sort_ts(), reverse=True)
-
     log(f"Matched jobs: {len(jobs)}")
 
     state = load_state()
     seen_ids = set(state.get("seen_ids", []))
-
     new_jobs = [job for job in jobs if job.id and job.id not in seen_ids]
 
     if not new_jobs:
@@ -1016,15 +550,12 @@ def main() -> int:
 
     alerts_sent = 0
     new_ids = []
-
     for job in new_jobs[:MAX_ALERTS_PER_RUN]:
         try:
             telegram_send(adapter.build_message(job))
             alerts_sent += 1
-
             if not DRY_RUN:
                 new_ids.append(job.id)
-
             time.sleep(1)
         except Exception as e:
             log(f"Failed to send Telegram message: {e}")
